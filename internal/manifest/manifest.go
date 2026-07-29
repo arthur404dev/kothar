@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/arthur404dev/kothar/internal/securefs"
 )
 
 const MaxBytes = 1 << 20
@@ -208,6 +209,7 @@ func ensureEOF(d *json.Decoder) error {
 	}
 	return nil
 }
+func ValidateJSON(data []byte) error { return checkJSON(data) }
 func checkJSON(data []byte) error {
 	d := json.NewDecoder(bytes.NewReader(data))
 	var walk func() error
@@ -411,30 +413,13 @@ func (m Manifest) Validate() error {
 // ValidateResources checks record-relative resources and host mount policy without mutation.
 func (m Manifest) ValidateResources(recordDir string, allowedMountRoots []string) error {
 	for _, rel := range append(append(append([]string{m.Behavior.SystemPrompt}, m.Behavior.ContextFiles...), m.Behavior.Skills...), m.Behavior.Extensions...) {
-		p := filepath.Join(recordDir, filepath.FromSlash(rel))
-		fi, err := os.Lstat(p)
-		if err != nil {
+		if _, err := securefs.CheckPath(recordDir, filepath.FromSlash(rel), false); err != nil {
 			return fmt.Errorf("resource %s: %w", rel, err)
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("resource %s is a symlink", rel)
-		}
-		resolved, err := filepath.EvalSymlinks(p)
-		if err != nil {
-			return err
-		}
-		relcheck, err := filepath.Rel(recordDir, resolved)
-		if err != nil || relcheck == ".." || strings.HasPrefix(relcheck, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("resource escapes record")
 		}
 	}
 	for _, mount := range m.Workspace.Mounts {
-		fi, err := os.Lstat(mount.Source)
-		if err != nil {
+		if _, err := securefs.CheckPath(string(filepath.Separator), strings.TrimPrefix(mount.Source, string(filepath.Separator)), true); err != nil {
 			return fmt.Errorf("mount source: %w", err)
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("mount source is a symlink")
 		}
 		allowed := false
 		for _, root := range allowedMountRoots {

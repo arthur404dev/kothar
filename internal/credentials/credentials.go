@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"time"
+
+	"github.com/arthur404dev/kothar/internal/securefs"
 )
 
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -38,32 +40,14 @@ func (s Store) Set(name string, r io.Reader) error {
 	if len(data) == 0 || len(data) > 1<<20 {
 		return fmt.Errorf("credential must contain 1..1048576 bytes")
 	}
-	if e = os.MkdirAll(s.Root, 0700); e != nil {
+	if e = securefs.EnsureDir(s.Root, 0700); e != nil {
 		return e
 	}
-	f, e := os.CreateTemp(s.Root, ".credential-")
-	if e != nil {
-		return e
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	e = f.Chmod(0600)
-	if e == nil {
-		_, e = f.Write(data)
-	}
+	e = securefs.AtomicWrite(p, data, 0600)
 	for i := range data {
 		data[i] = 0
 	}
-	if e == nil {
-		e = f.Sync()
-	}
-	if ce := f.Close(); e == nil {
-		e = ce
-	}
-	if e != nil {
-		return e
-	}
-	return os.Rename(tmp, p)
+	return e
 }
 func (s Store) List() ([]Metadata, error) {
 	es, e := os.ReadDir(s.Root)

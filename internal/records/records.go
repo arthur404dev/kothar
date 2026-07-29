@@ -12,6 +12,7 @@ import (
 	"regexp"
 
 	"github.com/arthur404dev/kothar/internal/manifest"
+	"github.com/arthur404dev/kothar/internal/securefs"
 )
 
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -42,7 +43,7 @@ func (s Store) Create(id string, data []byte) error {
 	if _, err = manifest.DecodeBytes(data); err != nil {
 		return err
 	}
-	if err = os.MkdirAll(s.Agents(), 0700); err != nil {
+	if err = securefs.EnsureDir(s.Agents(), 0700); err != nil {
 		return err
 	}
 	tmp, err := os.MkdirTemp(s.Agents(), ".create-")
@@ -75,43 +76,14 @@ func writeNew(path string, data []byte, mode fs.FileMode) error {
 	return e
 }
 func AtomicWrite(path string, data []byte, mode fs.FileMode) error {
-	d := filepath.Dir(path)
-	if e := os.MkdirAll(d, 0700); e != nil {
-		return e
-	}
-	f, e := os.CreateTemp(d, ".edit-")
-	if e != nil {
-		return e
-	}
-	n := f.Name()
-	defer os.Remove(n)
-	if e = f.Chmod(mode); e == nil {
-		_, e = f.Write(data)
-	}
-	if e == nil {
-		e = f.Sync()
-	}
-	if ce := f.Close(); e == nil {
-		e = ce
-	}
-	if e != nil {
-		return e
-	}
-	return os.Rename(n, path)
+	return securefs.AtomicWrite(path, data, mode)
 }
 func (s Store) Read(id string) ([]byte, error) {
-	p, e := s.Path(id)
-	if e != nil {
+	if _, e := s.Dir(id); e != nil {
 		return nil, e
 	}
-	fi, e := os.Lstat(p)
-	if e != nil {
-		return nil, e
-	}
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("record is not a regular file")
-	}
-	return os.ReadFile(p)
+	b, _, e := securefs.ReadFile(s.Config, filepath.Join("agents", id, "agent.json"), manifest.MaxBytes)
+	return b, e
 }
 func (s Store) List() ([]string, error) {
 	es, e := os.ReadDir(s.Agents())

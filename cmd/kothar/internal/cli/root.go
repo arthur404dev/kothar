@@ -2,19 +2,23 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/arthur404dev/kothar/internal/config"
 	"github.com/arthur404dev/kothar/internal/credentials"
 	deploy "github.com/arthur404dev/kothar/internal/deploy/systemd"
 	"github.com/arthur404dev/kothar/internal/engine"
 	"github.com/arthur404dev/kothar/internal/inbound"
 	"github.com/arthur404dev/kothar/internal/manifest"
 	"github.com/arthur404dev/kothar/internal/records"
+	"github.com/arthur404dev/kothar/internal/securefs"
 	"github.com/arthur404dev/kothar/internal/xdg"
 	"github.com/carapace-sh/carapace"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"io"
 	"os"
 	"os/exec"
@@ -23,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 type app struct {
@@ -48,7 +53,13 @@ func New(version string) *cobra.Command {
 }
 func (a *app) agents() *cobra.Command {
 	g := group("agent", "Manage agent records")
-	create := &cobra.Command{Use: "create <id>", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, x []string) error { b := defaultManifest(x[0]); return a.store.Create(x[0], b) }}
+	create := &cobra.Command{Use: "create <id>", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, x []string) error {
+		cfg, err := config.Load(a.paths.Config)
+		if err != nil {
+			return err
+		}
+		return a.store.Create(x[0], defaultManifest(x[0], cfg))
+	}}
 	list := a.jsonCmd("list", cobra.NoArgs, func([]string) (any, error) { return a.store.List() })
 	g.AddCommand(create, list, a.show(), a.edit(), a.validate(), a.render(), a.diff(), a.apply(), a.status(), a.logs())
 	for _, action := range []string{"start", "stop", "restart"} {
@@ -62,8 +73,12 @@ func (a *app) agents() *cobra.Command {
 		if _, e := os.Stat(a.store.Receipt(id)); errors.Is(e, os.ErrNotExist) {
 			return nil
 		}
-		_, _ = deploy.Service(c.Context(), a.runner, id, "stop")
-		_, _ = deploy.Service(c.Context(), a.runner, id, "disable")
+		if _, e := deploy.Service(c.Context(), a.runner, id, "stop"); e != nil {
+			return e
+		}
+		if _, e := deploy.Service(c.Context(), a.runner, id, "disable"); e != nil {
+			return e
+		}
 		return os.RemoveAll(filepath.Dir(a.store.Receipt(id)))
 	}))
 	g.AddCommand(a.agentCmd("delete", func(_ *cobra.Command, id string) error { return a.store.Delete(id) }))
@@ -76,13 +91,11 @@ func (a *app) agentCmd(name string, fn func(*cobra.Command, string) error) *cobr
 }
 func (a *app) show() *cobra.Command {
 	return a.jsonCmd("show <id>", cobra.ExactArgs(1), func(x []string) (any, error) {
-		b, e := a.store.Read(x[0])
+		r, e := a.load(x[0], nil)
 		if e != nil {
 			return nil, e
 		}
-		var v any
-		e = json.Unmarshal(b, &v)
-		return v, e
+		return r.Manifest, nil
 	})
 }
 func (a *app) edit() *cobra.Command {
@@ -90,11 +103,8 @@ func (a *app) edit() *cobra.Command {
 }
 func (a *app) validate() *cobra.Command {
 	c := a.agentCmd("validate", func(c *cobra.Command, id string) error {
-		m, d, e := a.load(id)
-		if e == nil {
-			roots, _ := c.Flags().GetStringSlice("allow-mount-root")
-			e = m.ValidateResources(d, roots)
-		}
+		roots, _ := c.Flags().GetStringSlice("allow-mount-root")
+		_, e := a.load(id, roots)
 		if e == nil {
 			fmt.Fprintln(c.OutOrStdout(), "valid")
 		}
@@ -103,48 +113,67 @@ func (a *app) validate() *cobra.Command {
 	c.Flags().StringSlice("allow-mount-root", nil, "allowed host mount root")
 	return c
 }
-func (a *app) load(id string) (*manifest.Manifest, string, error) {
+
+type loadedRecord struct {
+	Manifest  *manifest.Manifest
+	Effective []byte
+	Resources map[string][]byte
+}
+
+func (a *app) load(id string, restrictions []string) (*loadedRecord, error) {
 	b, e := a.store.Read(id)
 	if e != nil {
-		return nil, "", e
+		return nil, e
 	}
 	m, e := manifest.DecodeBytes(b)
-	d, _ := a.store.Dir(id)
-	if e == nil && m.ID != id {
-		e = fmt.Errorf("record id does not match directory")
+	if e != nil {
+		return nil, e
 	}
-	return m, d, e
-}
-func (a *app) render() *cobra.Command {
-	return a.jsonCmd("render <id>", cobra.ExactArgs(1), func(x []string) (any, error) {
-		m, _, e := a.load(x[0])
+	if m.ID != id {
+		return nil, fmt.Errorf("record id does not match directory")
+	}
+	d, _ := a.store.Dir(id)
+	cfg, e := config.Load(a.paths.Config)
+	if e != nil {
+		return nil, e
+	}
+	if e = m.ValidateResources(d, config.RestrictRoots(cfg.HostPolicy.AllowedMountRoots, restrictions)); e != nil {
+		return nil, e
+	}
+	resources := map[string][]byte{}
+	for _, rel := range append(append(append([]string{m.Behavior.SystemPrompt}, m.Behavior.ContextFiles...), m.Behavior.Skills...), m.Behavior.Extensions...) {
+		if _, exists := resources[rel]; exists {
+			continue
+		}
+		resources[rel], _, e = securefs.ReadFile(d, filepath.FromSlash(rel), manifest.MaxBytes)
 		if e != nil {
 			return nil, e
 		}
-		b, _ := json.Marshal(m)
-		p, e := a.plan(x[0], b, nil, false)
-		return map[string]any{"effective": m, "plan": p}, e
+	}
+	effective, _ := json.Marshal(m)
+	return &loadedRecord{m, effective, resources}, nil
+}
+func (a *app) render() *cobra.Command {
+	return a.jsonCmd("render <id>", cobra.ExactArgs(1), func(x []string) (any, error) {
+		r, e := a.load(x[0], nil)
+		if e != nil {
+			return nil, e
+		}
+		p, e := a.plan(x[0], r, nil, false)
+		return map[string]any{"effective": r.Manifest, "plan": p}, e
 	})
 }
-func (a *app) plan(id string, effective []byte, prev *deploy.Receipt, refresh bool) (deploy.Plan, error) {
-	d, err := a.store.Dir(id)
-	if err != nil {
-		return deploy.Plan{}, err
-	}
-	arts := []deploy.Artifact{{Path: "etc/kothar/agents/" + id + "/agent.json", Mode: 0600, Category: "config", Content: effective}}
-	for _, name := range []string{"SYSTEM.md", "AGENTS.md", "CONSTRAINTS.md"} {
-		b, e := os.ReadFile(filepath.Join(d, name))
-		if e != nil {
-			return deploy.Plan{}, e
-		}
-		arts = append(arts, deploy.Artifact{Path: "etc/kothar/agents/" + id + "/" + name, Mode: 0600, Category: "behavior", Content: b})
+func (a *app) plan(id string, r *loadedRecord, prev *deploy.Receipt, refresh bool) (deploy.Plan, error) {
+	arts := []deploy.Artifact{{Path: "etc/kothar/agents/" + id + "/agent.json", Mode: 0600, Category: "config", Content: r.Effective}}
+	for name, b := range r.Resources {
+		arts = append(arts, deploy.Artifact{Path: "etc/kothar/agents/" + id + "/" + filepath.ToSlash(name), Mode: 0600, Category: "behavior", Content: b})
 	}
 	arts = append(arts, deploy.Artifact{Path: "etc/systemd/system/" + deploy.Unit(id) + ".d/10-kothar.conf", Mode: 0644, Category: "service", Content: []byte("# runtime artifacts supplied by tasks 4-6\n")})
-	return deploy.Build(id, effective, prev, refresh, arts), nil
+	return deploy.Build(id, r.Effective, prev, refresh, arts), nil
 }
 func (a *app) diff() *cobra.Command {
 	return a.jsonCmd("diff <id>", cobra.ExactArgs(1), func(x []string) (any, error) {
-		b, e := a.store.Read(x[0])
+		r, e := a.load(x[0], nil)
 		if e != nil {
 			return nil, e
 		}
@@ -152,19 +181,17 @@ func (a *app) diff() *cobra.Command {
 		if r, er := deploy.LoadReceipt(a.store.Receipt(x[0])); er == nil {
 			prev = r
 		}
-		return a.plan(x[0], b, prev, false)
+		return a.plan(x[0], r, prev, false)
 	})
 }
 func (a *app) apply() *cobra.Command {
 	c := a.agentCmd("apply", func(c *cobra.Command, id string) error {
-		m, d, e := a.load(id)
+		roots, _ := c.Flags().GetStringSlice("allow-mount-root")
+		r, e := a.load(id, roots)
 		if e != nil {
 			return e
 		}
-		roots, _ := c.Flags().GetStringSlice("allow-mount-root")
-		if e = m.ValidateResources(d, roots); e != nil {
-			return e
-		}
+		m := r.Manifest
 		items, e := (credentials.Store{Root: filepath.Join(a.paths.State, "credentials")}).List()
 		if e != nil {
 			return e
@@ -249,16 +276,22 @@ func (a *app) credentials() *cobra.Command {
 	set := &cobra.Command{Use: "set <name>", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, x []string) error {
 		var r io.Reader = c.InOrStdin()
 		if file != "" {
-			f, e := os.Open(file)
+			base, name := filepath.Dir(file), filepath.Base(file)
+			b, fi, e := securefs.ReadFile(base, name, securefs.MaxFile)
 			if e != nil {
 				return e
 			}
-			defer f.Close()
-			fi, e := f.Stat()
-			if e != nil || fi.Mode().Perm()&0077 != 0 {
-				return fmt.Errorf("credential file must be protected (0600)")
+			st, ok := fi.Sys().(*syscall.Stat_t)
+			if fi.Mode().Perm() != 0600 || !ok || int(st.Uid) != os.Geteuid() {
+				return fmt.Errorf("credential file must be owned by the current user and protected (0600)")
 			}
-			r = f
+			r = bytes.NewReader(b)
+		} else if r == os.Stdin && term.IsTerminal(int(os.Stdin.Fd())) {
+			b, e := term.ReadPassword(int(os.Stdin.Fd()))
+			if e != nil {
+				return e
+			}
+			r = bytes.NewReader(b)
 		}
 		return s.Set(x[0], r)
 	}}
@@ -269,23 +302,11 @@ func (a *app) credentials() *cobra.Command {
 func (a *app) config() *cobra.Command {
 	g := group("config", "Inspect configuration")
 	path := &cobra.Command{Use: "path", Args: cobra.NoArgs, RunE: func(c *cobra.Command, _ []string) error { fmt.Fprintln(c.OutOrStdout(), a.paths.Config); return nil }}
-	show := a.jsonCmd("show", cobra.NoArgs, func([]string) (any, error) {
-		p := filepath.Join(a.paths.Config, "config.json")
-		b, e := os.ReadFile(p)
-		if errors.Is(e, os.ErrNotExist) {
-			return map[string]any{"allowed_mount_roots": []string{}}, nil
-		}
-		if e != nil {
-			return nil, e
-		}
-		var v any
-		e = json.Unmarshal(b, &v)
-		return v, e
-	})
+	show := a.jsonCmd("show", cobra.NoArgs, func([]string) (any, error) { return config.Load(a.paths.Config) })
 	edit := &cobra.Command{Use: "edit", Args: cobra.NoArgs, RunE: func(c *cobra.Command, _ []string) error {
 		p := filepath.Join(a.paths.Config, "config.json")
 		if _, e := os.Stat(p); errors.Is(e, os.ErrNotExist) {
-			if e = records.AtomicWrite(p, []byte("{\n  \"allowed_mount_roots\": []\n}\n"), 0600); e != nil {
+			if e = records.AtomicWrite(p, []byte("{\n  \"agent_defaults\": {},\n  \"host_policy\": {\"allowed_mount_roots\": []}\n}\n"), 0600); e != nil {
 				return e
 			}
 		}
@@ -362,7 +383,7 @@ func help(c *cobra.Command, x []string) error {
 	return c.Help()
 }
 func editJSONAtomic(p string) error {
-	b, err := os.ReadFile(p)
+	b, _, err := securefs.ReadFile(filepath.Dir(p), filepath.Base(p), manifest.MaxBytes)
 	if err != nil {
 		return err
 	}
@@ -386,18 +407,8 @@ func editJSONAtomic(p string) error {
 	if err != nil {
 		return err
 	}
-	var v struct {
-		AllowedMountRoots []string `json:"allowed_mount_roots"`
-	}
-	d := json.NewDecoder(strings.NewReader(string(b)))
-	d.DisallowUnknownFields()
-	if err = d.Decode(&v); err != nil {
+	if _, err = config.DecodeBytes(b); err != nil {
 		return err
-	}
-	for _, root := range v.AllowedMountRoots {
-		if !filepath.IsAbs(root) || filepath.Clean(root) != root {
-			return fmt.Errorf("allowed mount roots must be clean absolute paths")
-		}
 	}
 	return records.AtomicWrite(p, b, 0600)
 }
@@ -416,9 +427,15 @@ func editFile(p string) error {
 	return cmd.Run()
 }
 func Execute(version string) error { return New(version).ExecuteContext(context.Background()) }
-func defaultManifest(id string) []byte {
+func defaultManifest(id string, cfg config.Config) []byte {
 	title := strings.ToUpper(id[:1]) + id[1:]
 	v := map[string]any{"version": 1, "id": id, "profile": map[string]any{"display_name": title, "description": "", "labels": []string{}}, "inbound": map[string]any{"name": "buzz", "options": map[string]any{"relay": "wss://buzz.4o4.one", "identity_credential": "buzz-" + id, "respond_to": map[string]any{"mode": "nobody", "pubkeys": []string{}}, "heartbeat_seconds": 300}}, "engine": map[string]any{"name": "pi", "credentials": map[string]any{"mode": "inherit", "overrides": map[string]string{}}, "options": map[string]any{"project_trust": "never", "telemetry": false, "update_checks": false}}, "models": map[string]any{"primary": "anthropic/claude-sonnet-4-6", "fallbacks": []string{}, "thinking": "high", "max_attempts": 2}, "behavior": map[string]any{"system_prompt": "SYSTEM.md", "context_files": []string{"AGENTS.md", "CONSTRAINTS.md"}, "skills": []string{}, "extensions": []string{}}, "tools": map[string]any{"bundles": []string{"buzz", "workspace", "git"}, "allow": []string{}, "deny": []string{}, "credentials": map[string]string{}}, "workspace": map[string]any{"root": "workspace", "mounts": []any{}}, "permissions": map[string]any{"network": map[string]any{"mode": "full"}, "resources": map[string]any{"memory_max_mb": 4096, "cpu_quota_percent": 200, "tasks_max": 512}}, "runtime": map[string]any{"driver": "systemd", "start_on_boot": true, "restart": "always", "workers": 1}}
+	if cfg.AgentDefaults.Models != nil {
+		v["models"] = cfg.AgentDefaults.Models
+	}
+	if cfg.AgentDefaults.Permissions != nil {
+		v["permissions"] = cfg.AgentDefaults.Permissions
+	}
 	b, _ := json.MarshalIndent(v, "", "  ")
 	return append(b, '\n')
 }

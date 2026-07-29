@@ -73,6 +73,58 @@ func TestCompletion(t *testing.T) {
 	}
 }
 
+func TestCreateCopiesDefaultsOnceAndRejectsAliasedRecord(t *testing.T) {
+	configDir, stateDir := t.TempDir(), t.TempDir()
+	t.Setenv("KOTHAR_CONFIG_DIR", configDir)
+	t.Setenv("KOTHAR_STATE_DIR", stateDir)
+	cfg := `{"agent_defaults":{"models":{"primary":"openai/gpt-5","fallbacks":[],"thinking":"low","max_attempts":1}},"host_policy":{"allowed_mount_roots":[]}}`
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(cfg), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "agent", "create", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(configDir, "agents", "alpha", "agent.json")
+	before, _ := os.ReadFile(manifestPath)
+	if !bytes.Contains(before, []byte(`"primary": "openai/gpt-5"`)) {
+		t.Fatal("defaults not copied")
+	}
+	cfg = `{"agent_defaults":{"models":{"primary":"ollama/local","fallbacks":[],"thinking":"off","max_attempts":1}},"host_policy":{"allowed_mount_roots":[]}}`
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(cfg), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "agent", "show", "alpha", "--json"); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(manifestPath)
+	if !bytes.Equal(before, after) {
+		t.Fatal("existing record received defaults overlay")
+	}
+	if err := os.Symlink(filepath.Join(configDir, "agents", "alpha"), filepath.Join(configDir, "agents", "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "agent", "show", "alias", "--json"); err == nil {
+		t.Fatal("symlinked agent directory accepted")
+	}
+}
+
+func TestCredentialFileRejectsSymlink(t *testing.T) {
+	t.Setenv("KOTHAR_CONFIG_DIR", t.TempDir())
+	t.Setenv("KOTHAR_STATE_DIR", t.TempDir())
+	d := t.TempDir()
+	real := filepath.Join(d, "secret")
+	link := filepath.Join(d, "link")
+	if err := os.WriteFile(real, []byte("value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "credential", "set", "test", "--file", link); err == nil {
+		t.Fatal("symlink credential accepted")
+	}
+}
+
 func TestAgentIDCompletionFromXDGRecords(t *testing.T) {
 	config := t.TempDir()
 	t.Setenv("KOTHAR_CONFIG_DIR", config)

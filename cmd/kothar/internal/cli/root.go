@@ -78,7 +78,7 @@ func (a *app) serveACP() *cobra.Command {
 		for _, name := range append(m.Behavior.ContextFiles, m.Behavior.Skills...) {
 			system += "\n\n# " + name + "\n" + string(r.Resources[name])
 		}
-		svc := framework.New(engine.Agent{ID: m.ID, SystemPrompt: system, Resources: r.Resources, Models: engine.ModelPolicy{Primary: m.Models.Primary, Fallbacks: m.Models.Fallbacks, Thinking: m.Models.Thinking, MaxAttempts: m.Models.MaxAttempts}, Tools: engine.ToolPolicy{Bundles: m.Tools.Bundles, Allow: m.Tools.Allow, Deny: m.Tools.Deny}}, a.factory)
+		svc := framework.New(a.engineAgent(r, system, false), a.factory)
 		return (&acp.Server{In: c.InOrStdin(), Out: c.OutOrStdout(), Err: c.ErrOrStderr(), Service: svc}).Serve(c.Context())
 	}}
 	completeAgents(c, a)
@@ -231,11 +231,26 @@ func (a *app) diff() *cobra.Command {
 		return a.plan(x[0], r, prev, false)
 	})
 }
+func (a *app) engineAgent(r *loadedRecord, system string, refresh bool) engine.Agent {
+	m := r.Manifest
+	hostAuth := os.Getenv("KOTHAR_PI_HOST_AUTH")
+	if hostAuth == "" {
+		if d, e := os.UserConfigDir(); e == nil {
+			hostAuth = filepath.Join(d, "pi", "agent", "auth.json")
+		}
+	}
+	return engine.Agent{ID: m.ID, SystemPrompt: system, Resources: r.Resources, Skills: m.Behavior.Skills, Extensions: m.Behavior.Extensions,
+		Models:      engine.ModelPolicy{Primary: m.Models.Primary, Fallbacks: m.Models.Fallbacks, Thinking: m.Models.Thinking, MaxAttempts: m.Models.MaxAttempts},
+		Tools:       engine.ToolPolicy{Bundles: m.Tools.Bundles, Allow: m.Tools.Allow, Deny: m.Tools.Deny},
+		Credentials: engine.CredentialPolicy{Mode: m.Engine.Credentials.Mode, HostAuth: hostAuth, Overrides: m.Engine.Credentials.Overrides, StoreRoot: filepath.Join(a.paths.State, "credentials"), Refresh: refresh}}
+}
 func (a *app) apply() *cobra.Command {
 	c := a.agentCmd("apply", func(c *cobra.Command, id string) error {
-		if _, e := a.receipt(id); e != nil {
+		prev, e := a.receipt(id)
+		if e != nil {
 			return e
 		}
+		refresh, _ := c.Flags().GetBool("refresh-credentials")
 		roots, _ := c.Flags().GetStringSlice("allow-mount-root")
 		r, e := a.load(id, roots)
 		if e != nil {
@@ -262,7 +277,22 @@ func (a *app) apply() *cobra.Command {
 				return fmt.Errorf("required credential %q is not installed", ref)
 			}
 		}
-		return deploy.ErrRuntimeIncomplete
+		p, e := a.plan(id, r, prev, refresh)
+		if e != nil {
+			return e
+		}
+		root := os.Getenv("KOTHAR_DEPLOY_ROOT")
+		if root == "" {
+			root = "/"
+		}
+		if e = deploy.ApplyFixture(root, a.store.Receipt(id), p, -1); e != nil {
+			return e
+		}
+		system := string(r.Resources[m.Behavior.SystemPrompt])
+		for _, name := range append(m.Behavior.ContextFiles, m.Behavior.Skills...) {
+			system += "\n\n# " + name + "\n" + string(r.Resources[name])
+		}
+		return enginepi.Prepare(filepath.Join(root, "var/lib/kothar/agents", id, "engine"), a.engineAgent(r, system, refresh), "/usr/local/libexec/kothar/buzz")
 	})
 	c.Flags().Bool("refresh-credentials", false, "reseed inherited provider credentials")
 	c.Flags().StringSlice("allow-mount-root", nil, "allowed host mount root")

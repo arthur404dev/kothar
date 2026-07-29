@@ -4,10 +4,18 @@ package engine
 import "context"
 
 type Agent struct {
-	ID, SystemPrompt string
-	Models           ModelPolicy
-	Tools            ToolPolicy
-	Resources        map[string][]byte
+	ID, SystemPrompt   string
+	Models             ModelPolicy
+	Tools              ToolPolicy
+	Resources          map[string][]byte
+	Skills, Extensions []string
+	Credentials        CredentialPolicy
+}
+type CredentialPolicy struct {
+	Mode, HostAuth string
+	Overrides      map[string]string
+	StoreRoot      string
+	Refresh        bool
 }
 type ModelPolicy struct {
 	Primary     string
@@ -22,7 +30,7 @@ type Request struct {
 	Content   []Content
 }
 type Content struct{ Type, Text string }
-type Event struct{ Type, Text, ToolCallID, Status string }
+type Event struct{ Type, Text, ToolCallID, Status, Model string }
 
 type Failure struct {
 	Class string

@@ -48,6 +48,9 @@ func (f *Factory) New(_ context.Context, a engine.Agent, s engine.Session) (engi
 	if err := os.Chmod(root, 0700); err != nil {
 		return nil, fail("engine_unavailable", "cannot protect Pi state", err)
 	}
+	if err := Prepare(root, a, f.BuzzPath); err != nil {
+		return nil, fail("engine_unavailable", "cannot prepare isolated Pi state", err)
+	}
 	return &runner{factory: f, agent: a, session: s, root: root}, nil
 }
 
@@ -102,10 +105,15 @@ func (r *runner) Prompt(ctx context.Context, req engine.Request, emit func(engin
 		if ctx.Err() != nil {
 			return engine.Cancelled, nil
 		}
+		if err := emit(engine.Event{Type: "attempt", Model: models[i], Status: "in_progress"}); err != nil {
+			return "", err
+		}
 		stop, visible, sideEffect, err := r.attempt(ctx, models[i], req, emit)
 		if err == nil {
+			_ = emit(engine.Event{Type: "attempt", Model: models[i], Status: "completed"})
 			return stop, nil
 		}
+		_ = emit(engine.Event{Type: "attempt", Model: models[i], Status: "failed"})
 		last = err
 		if visible || sideEffect || !retryable(err) || errors.Is(err, context.Canceled) {
 			break
@@ -155,6 +163,7 @@ func (r *runner) attempt(ctx context.Context, model string, req engine.Request, 
 		return "", false, false, err
 	}
 	visible, sideEffect := false, false
+	lastStop := engine.EndTurn
 	for {
 		select {
 		case <-ctx.Done():
@@ -207,6 +216,7 @@ func (r *runner) attempt(ctx context.Context, model string, req engine.Request, 
 						return "", visible, sideEffect, err
 					}
 				case "thinking_delta":
+					visible = true
 					if err := emit(engine.Event{Type: "thought_delta", Text: e.Delta}); err != nil {
 						return "", visible, sideEffect, err
 					}
@@ -227,8 +237,10 @@ func (r *runner) attempt(ctx context.Context, model string, req engine.Request, 
 				if err := emit(engine.Event{Type: "tool_call_update", ToolCallID: p.ID, Status: "completed"}); err != nil {
 					return "", visible, sideEffect, err
 				}
+			case "message_end":
+				lastStop = stopReason(p.Message.StopReason)
 			case "agent_settled":
-				return engine.EndTurn, visible, sideEffect, nil
+				return lastStop, visible, sideEffect, nil
 			}
 		}
 	}
@@ -251,10 +263,19 @@ func (r *runner) start(model string) (*child, error) {
 		}
 	}
 	args := []string{"--provider", provider, "--model", name, "--thinking", r.agent.Models.Thinking, "--mode", "rpc", "--no-themes", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve", "--session-dir", sessions, "--system-prompt", r.agent.SystemPrompt}
+	for _, p := range r.agent.Extensions {
+		args = append(args, "--extension", filepath.Join(r.root, "resources", filepath.FromSlash(p)))
+	}
+	for _, p := range r.agent.Skills {
+		args = append(args, "--skill", filepath.Join(r.root, "resources", filepath.FromSlash(p)))
+	}
 	if len(r.agent.Tools.Allow) == 0 {
 		args = append(args, "--no-tools")
 	} else {
 		args = append(args, "--tools", strings.Join(r.agent.Tools.Allow, ","))
+	}
+	if len(r.agent.Tools.Deny) > 0 {
+		args = append(args, "--exclude-tools", strings.Join(r.agent.Tools.Deny, ","))
 	}
 	cmd := exec.Command(r.factory.Executable, args...)
 	cmd.Dir = r.session.CWD
@@ -281,18 +302,14 @@ func (r *runner) start(model string) (*child, error) {
 func scan(rd io.Reader, out chan<- line) {
 	br := bufio.NewReaderSize(rd, 64<<10)
 	for {
-		b, err := br.ReadSlice('\n')
-		if errors.Is(err, bufio.ErrBufferFull) {
-			out <- line{err: fmt.Errorf("protocol line exceeds %d bytes", maxLine)}
-			return
-		}
+		b, err := br.ReadString('\n')
 		if len(b) > maxLine {
 			out <- line{err: fmt.Errorf("protocol line exceeds limit")}
 			return
 		}
 		if len(b) > 0 {
-			b = bytes.TrimSuffix(bytes.TrimSuffix(b, []byte{'\n'}), []byte{'\r'})
-			out <- line{raw: append([]byte(nil), b...)}
+			b = strings.TrimSuffix(strings.TrimSuffix(b, "\n"), "\r")
+			out <- line{raw: []byte(b)}
 		}
 		if err != nil {
 			out <- line{err: err}
@@ -340,6 +357,20 @@ func verify(path, expected string) error {
 		return fail("policy", "Pi executable hash mismatch", nil)
 	}
 	return nil
+}
+func stopReason(value string) engine.StopReason {
+	switch strings.ToLower(strings.ReplaceAll(value, "-", "_")) {
+	case "max_tokens", "length":
+		return engine.MaxTokens
+	case "max_turn_requests":
+		return engine.MaxTurnRequests
+	case "refusal":
+		return engine.Refusal
+	case "cancelled", "aborted":
+		return engine.Cancelled
+	default:
+		return engine.EndTurn
+	}
 }
 func retryable(err error) bool {
 	var f *engine.Failure

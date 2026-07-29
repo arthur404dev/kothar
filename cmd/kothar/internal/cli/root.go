@@ -122,6 +122,28 @@ func (a *app) agents() *cobra.Command {
 		if _, e := deploy.Service(c.Context(), a.runner, id, "disable"); e != nil {
 			return e
 		}
+		root := os.Getenv("KOTHAR_DEPLOY_ROOT")
+		if root == "" {
+			root = "/"
+		}
+		for _, artifact := range receipt.Artifacts {
+			path := filepath.Join(root, artifact.Path)
+			content, readErr := os.ReadFile(path)
+			if errors.Is(readErr, os.ErrNotExist) {
+				continue
+			}
+			if readErr != nil || deploy.Hash(content) != artifact.Hash {
+				return fmt.Errorf("refusing to remove modified artifact %q", artifact.Path)
+			}
+			if e := os.Remove(path); e != nil {
+				return e
+			}
+		}
+		if root == "/" {
+			if _, e := a.runner.Run(c.Context(), "systemctl", "daemon-reload"); e != nil {
+				return e
+			}
+		}
 		return os.RemoveAll(filepath.Dir(a.store.Receipt(id)))
 	}))
 	g.AddCommand(a.agentCmd("delete", func(_ *cobra.Command, id string) error { return a.store.Delete(id) }))
@@ -290,9 +312,6 @@ func (a *app) apply() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		if len(p.Categories) == 0 && !refresh {
-			return nil
-		}
 		root := os.Getenv("KOTHAR_DEPLOY_ROOT")
 		if root == "" {
 			root = "/"
@@ -303,6 +322,24 @@ func (a *app) apply() *cobra.Command {
 			if statErr != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0077 != 0 {
 				return fmt.Errorf("protected inbound credential is unavailable")
 			}
+		}
+		if len(p.Categories) == 0 && !refresh {
+			if root != "/" {
+				return nil
+			}
+			if _, e = a.runner.Run(c.Context(), "systemctl", "daemon-reload"); e != nil {
+				return e
+			}
+			if m.Runtime.StartOnBoot {
+				_, e = a.runner.Run(c.Context(), "systemctl", "enable", deploy.Unit(id))
+			} else {
+				_, e = a.runner.Run(c.Context(), "systemctl", "disable", deploy.Unit(id))
+			}
+			if e != nil {
+				return e
+			}
+			_, e = deploy.Service(c.Context(), a.runner, id, "restart")
+			return e
 		}
 		if e = deploy.ApplyFixture(root, a.store.Receipt(id), p, -1); e != nil {
 			return e
@@ -360,9 +397,12 @@ func (a *app) apply() *cobra.Command {
 			return e
 		}
 		if m.Runtime.StartOnBoot {
-			if _, e = a.runner.Run(c.Context(), "systemctl", "enable", deploy.Unit(id)); e != nil {
-				return e
-			}
+			_, e = a.runner.Run(c.Context(), "systemctl", "enable", deploy.Unit(id))
+		} else {
+			_, e = a.runner.Run(c.Context(), "systemctl", "disable", deploy.Unit(id))
+		}
+		if e != nil {
+			return e
 		}
 		_, e = deploy.Service(c.Context(), a.runner, id, "restart")
 		return e

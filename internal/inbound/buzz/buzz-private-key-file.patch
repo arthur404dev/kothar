@@ -1,5 +1,5 @@
 diff --git a/Cargo.lock b/Cargo.lock
-index 3b60dc45..4488c0f1 100644
+index 3b60dc457..4488c0f12 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -1219,6 +1219,7 @@ dependencies = [
@@ -8,16 +8,79 @@ index 3b60dc45..4488c0f1 100644
   "uuid",
 + "zeroize",
  ]
- 
+
  [[package]]
+diff --git a/crates/buzz-acp/src/acp.rs b/crates/buzz-acp/src/acp.rs
+index c0147baf1..239fef041 100644
+--- a/crates/buzz-acp/src/acp.rs
++++ b/crates/buzz-acp/src/acp.rs
+@@ -397,6 +397,11 @@ impl AcpClient {
+         }
+     }
+
++    /// Reap and report an agent subprocess that exited while idle.
++    pub fn exited(&mut self) -> Result<Option<std::process::ExitStatus>, AcpError> {
++        self.child.try_wait().map_err(AcpError::Io)
++    }
++
+     /// Spawn the agent binary as a subprocess and connect to its stdio pipes.
+     ///
+     /// `has_generated_codex_config` must be true when `codex_network_env()` successfully
+@@ -414,6 +419,9 @@ impl AcpClient {
+         use std::process::Stdio;
+
+         let mut cmd = tokio::process::Command::new(command);
++        for key in ["BUZZ_PRIVATE_KEY", "BUZZ_PRIVATE_KEY_FILE", "CREDENTIALS_DIRECTORY"] {
++            cmd.env_remove(key);
++        }
+         cmd.args(args)
+             .stdin(Stdio::piped())
+             .stdout(Stdio::piped())
+@@ -2653,6 +2661,36 @@ mod tests {
+             .expect("failed to spawn test script")
+     }
+
++    #[tokio::test]
++    async fn idle_child_exit_is_reaped() {
++        let mut client = spawn_script("exit 23").await;
++        let status = tokio::time::timeout(std::time::Duration::from_secs(2), async {
++            loop {
++                if let Some(status) = client.exited().unwrap() {
++                    break status;
++                }
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .unwrap();
++        assert_eq!(status.code(), Some(23));
++    }
++
++    #[tokio::test]
++    async fn inbound_identity_environment_is_not_inherited() {
++        std::env::set_var("BUZZ_PRIVATE_KEY_FILE", "/run/secret");
++        std::env::set_var("CREDENTIALS_DIRECTORY", "/run/credentials");
++        let mut client = spawn_script(
++            "test -z \"$BUZZ_PRIVATE_KEY_FILE$CREDENTIALS_DIRECTORY\" && sleep 10",
++        )
++        .await;
++        assert!(client.exited().unwrap().is_none());
++        client.shutdown().await;
++        std::env::remove_var("BUZZ_PRIVATE_KEY_FILE");
++        std::env::remove_var("CREDENTIALS_DIRECTORY");
++    }
++
+     #[tokio::test]
+     async fn idle_timeout_fires_on_silent_process() {
+         let mut client = spawn_script("sleep 10").await;
 diff --git a/crates/buzz-acp/src/config.rs b/crates/buzz-acp/src/config.rs
-index 9a1b74c2..b4c016c3 100644
+index 9a1b74c27..b4c016c3a 100644
 --- a/crates/buzz-acp/src/config.rs
 +++ b/crates/buzz-acp/src/config.rs
 @@ -240,8 +240,11 @@ pub struct CliArgs {
      #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
      pub relay_url: String,
- 
+
 -    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
 -    pub private_key: String,
 +    #[arg(long, env = "BUZZ_PRIVATE_KEY", conflicts_with = "private_key_file")]
@@ -25,7 +88,7 @@ index 9a1b74c2..b4c016c3 100644
 +
 +    #[arg(long, env = "BUZZ_PRIVATE_KEY_FILE", conflicts_with = "private_key")]
 +    pub private_key_file: Option<PathBuf>,
- 
+
      /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
      #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
 @@ -809,13 +812,12 @@ impl Config {
@@ -45,12 +108,12 @@ index 9a1b74c2..b4c016c3 100644
 +        )
 +        .map_err(|e| ConfigError::ConfigFile(e.to_string()))?;
 +        let keys = Keys::parse(private_key.as_str())?;
- 
+
          let system_prompt = if let Some(text) = args.system_prompt {
              Some(text)
 @@ -2657,6 +2659,19 @@ channels = "ALL"
      // The env-var wiring is covered by the clap #[arg(env)] attribute itself.
- 
+
      // A minimal valid private key for test use (secp256k1 scalar = 1).
 +    #[test]
 +    fn private_key_file_is_accepted_and_conflicts_with_inline_key() {
@@ -67,9 +130,62 @@ index 9a1b74c2..b4c016c3 100644
 +
      const TEST_PRIVATE_KEY: &str =
          "0000000000000000000000000000000000000000000000000000000000000001";
- 
+
+diff --git a/crates/buzz-acp/src/lib.rs b/crates/buzz-acp/src/lib.rs
+index b11d96d8f..6984eb2dd 100644
+--- a/crates/buzz-acp/src/lib.rs
++++ b/crates/buzz-acp/src/lib.rs
+@@ -1606,7 +1606,7 @@ async fn tokio_main() -> Result<()> {
+     // Runs at the TOP of every loop iteration via Instant check — cannot be
+     // starved by the biased select. Slot refill spawns background tasks so
+     // spawn_and_init never blocks the main loop.
+-    let maintenance_interval = Duration::from_secs(30);
++    let maintenance_interval = Duration::from_secs(1);
+     let mut last_maintenance = std::time::Instant::now();
+
+     // Channel for background respawn tasks to return completed agents.
+@@ -1744,6 +1744,11 @@ async fn tokio_main() -> Result<()> {
+
+         if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
+             last_maintenance = std::time::Instant::now();
++            if let Some((index, status)) = pool.idle_child_exit()? {
++                return Err(anyhow::anyhow!(
++                    "agent {index} exited unexpectedly ({status}); exiting for service restart"
++                ));
++            }
+             queue.compact_expired_state();
+
+             // Slot refill: spawn background tasks for empty slots whose
+@@ -1903,6 +1908,7 @@ async fn tokio_main() -> Result<()> {
+                     None
+                 }
+                 // Remaining branches don't touch pool — evaluated when pool is idle.
++                _ = tokio::time::sleep(maintenance_interval) => None,
+                 buzz_event = relay.next_event() => {
+                     let _ = result_rx; // end split borrow before relay handling
+                     match buzz_event {
+diff --git a/crates/buzz-acp/src/pool.rs b/crates/buzz-acp/src/pool.rs
+index 0c51fe954..e82be093e 100644
+--- a/crates/buzz-acp/src/pool.rs
++++ b/crates/buzz-acp/src/pool.rs
+@@ -695,6 +695,15 @@ impl AgentPool {
+         self.task_map.values().any(|m| m.agent_index == index)
+     }
+
++    pub fn idle_child_exit(&mut self) -> Result<Option<(usize, std::process::ExitStatus)>, AcpError> {
++        for agent in self.agents.iter_mut().flatten() {
++            if let Some(status) = agent.acp.exited()? {
++                return Ok(Some((agent.index, status)));
++            }
++        }
++        Ok(None)
++    }
++
+     pub fn agents_mut(&mut self) -> &mut Vec<Option<OwnedAgent>> {
+         &mut self.agents
+     }
 diff --git a/crates/buzz-cli/src/lib.rs b/crates/buzz-cli/src/lib.rs
-index 6ab81a08..78c3f2a3 100644
+index 6ab81a082..78c3f2a36 100644
 --- a/crates/buzz-cli/src/lib.rs
 +++ b/crates/buzz-cli/src/lib.rs
 @@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
@@ -78,16 +194,16 @@ index 6ab81a08..78c3f2a3 100644
  use nostr::Keys;
 +use std::path::PathBuf;
  use uuid::Uuid;
- 
+
  /// Run the Buzz CLI from raw arguments (including `argv[0]`).
 @@ -82,9 +83,13 @@ struct Cli {
      relay: String,
- 
+
      /// Nostr private key (hex or nsec). This is the CLI's identity.
 -    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
 +    #[arg(long, env = "BUZZ_PRIVATE_KEY", conflicts_with = "private_key_file")]
      private_key: Option<String>,
- 
+
 +    /// Read the Nostr private key from a protected regular file.
 +    #[arg(long, env = "BUZZ_PRIVATE_KEY_FILE", conflicts_with = "private_key")]
 +    private_key_file: Option<PathBuf>,
@@ -96,7 +212,7 @@ index 6ab81a08..78c3f2a3 100644
      #[arg(long, env = "BUZZ_AUTH_TAG")]
      auth_tag: Option<String>,
 @@ -1743,11 +1748,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
- 
+
      // Auth: private key is required for all relay operations.
      // The keypair IS the identity — no tokens, no other auth.
 -    let private_key_str = cli.private_key.ok_or_else(|| {
@@ -108,13 +224,13 @@ index 6ab81a08..78c3f2a3 100644
 +        .map_err(|e| CliError::Auth(e.to_string()))?;
 +    let keys = Keys::parse(private_key.as_str())
 +        .map_err(|_| CliError::Key("invalid private key".into()))?;
- 
+
      // NIP-OA: parse and verify the auth tag if provided.
      let (auth_tag, auth_tag_json) = match cli.auth_tag {
 @@ -1803,6 +1807,28 @@ mod tests {
          Cli::command().debug_assert();
      }
- 
+
 +    #[test]
 +    fn private_key_file_is_accepted_and_conflicts_with_inline_key() {
 +        assert!(Cli::try_parse_from([
@@ -141,12 +257,12 @@ index 6ab81a08..78c3f2a3 100644
      fn command_inventory_is_stable() {
          let expected_groups: Vec<&str> = vec![
 diff --git a/crates/buzz-sdk/Cargo.toml b/crates/buzz-sdk/Cargo.toml
-index da8fd0bd..340724b1 100644
+index da8fd0bd0..340724b19 100644
 --- a/crates/buzz-sdk/Cargo.toml
 +++ b/crates/buzz-sdk/Cargo.toml
 @@ -8,9 +8,10 @@ repository.workspace = true
  description = "Typed Nostr event builders for Buzz operations"
- 
+
  [dependencies]
 +thiserror = { workspace = true }
 +zeroize = { workspace = true }
@@ -156,114 +272,15 @@ index da8fd0bd..340724b1 100644
  serde = { workspace = true }
  serde_json = { workspace = true }
 -thiserror = { workspace = true }
-diff --git a/crates/buzz-sdk/src/identity.rs b/crates/buzz-sdk/src/identity.rs
-new file mode 100644
-index 00000000..aa2fcc2b
---- /dev/null
-+++ b/crates/buzz-sdk/src/identity.rs
-@@ -0,0 +1,93 @@
-+//! Protected private-key input shared by Buzz binaries.
-+
-+use std::{
-+    fs,
-+    path::{Path, PathBuf},
-+};
-+use thiserror::Error;
-+use zeroize::Zeroizing;
-+
-+const MAX_KEY_BYTES: u64 = 256;
-+
-+/// Secret-free private-key input errors.
-+#[derive(Debug, Error)]
-+pub enum IdentityError {
-+    /// No key source was configured.
-+    #[error("private key is required")]
-+    Missing,
-+    /// More than one key source was configured.
-+    #[error("configure exactly one private key source")]
-+    Multiple,
-+    /// The protected key file was unsafe or malformed.
-+    #[error("private key file is invalid")]
-+    InvalidFile,
-+}
-+
-+/// Read exactly one inline or protected regular-file private key.
-+pub fn read_private_key(
-+    inline: Option<String>,
-+    file: Option<PathBuf>,
-+) -> Result<Zeroizing<String>, IdentityError> {
-+    match (inline, file) {
-+        (None, None) => Err(IdentityError::Missing),
-+        (Some(_), Some(_)) => Err(IdentityError::Multiple),
-+        (Some(value), None) if valid(&value) => Ok(Zeroizing::new(value)),
-+        (Some(_), None) => Err(IdentityError::InvalidFile),
-+        (None, Some(path)) => read_file(&path),
-+    }
-+}
-+
-+fn read_file(path: &Path) -> Result<Zeroizing<String>, IdentityError> {
-+    let metadata = fs::symlink_metadata(path).map_err(|_| IdentityError::InvalidFile)?;
-+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_KEY_BYTES {
-+        return Err(IdentityError::InvalidFile);
-+    }
-+    let mut bytes = Zeroizing::new(fs::read(path).map_err(|_| IdentityError::InvalidFile)?);
-+    if bytes.last() == Some(&b'\n') {
-+        bytes.pop();
-+        if bytes.last() == Some(&b'\r') {
-+            bytes.pop();
-+        }
-+    }
-+    let value = String::from_utf8(bytes.to_vec()).map_err(|_| IdentityError::InvalidFile)?;
-+    if !valid(&value) {
-+        return Err(IdentityError::InvalidFile);
-+    }
-+    Ok(Zeroizing::new(value))
-+}
-+
-+fn valid(value: &str) -> bool {
-+    !value.is_empty() && !value.bytes().any(|b| b == 0 || b.is_ascii_whitespace())
-+}
-+
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+    use std::{fs::OpenOptions, io::Write};
-+
-+    #[test]
-+    fn protected_file_parser_rejects_unsafe_shapes() {
-+        let dir = std::env::temp_dir().join(format!("buzz-key-test-{}", std::process::id()));
-+        let _ = fs::remove_dir_all(&dir);
-+        fs::create_dir(&dir).unwrap();
-+        let key = dir.join("key");
-+        let mut f = OpenOptions::new()
-+            .create_new(true)
-+            .write(true)
-+            .open(&key)
-+            .unwrap();
-+        writeln!(f, "{}", "1".repeat(64)).unwrap();
-+        assert_eq!(read_private_key(None, Some(key.clone())).unwrap().len(), 64);
-+        fs::write(&key, b"a\nb\n").unwrap();
-+        assert!(read_private_key(None, Some(key.clone())).is_err());
-+        fs::write(&key, vec![b'a'; 257]).unwrap();
-+        assert!(read_private_key(None, Some(key.clone())).is_err());
-+        #[cfg(unix)]
-+        {
-+            let link = dir.join("link");
-+            std::os::unix::fs::symlink(&key, &link).unwrap();
-+            assert!(read_private_key(None, Some(link)).is_err());
-+        }
-+        fs::remove_dir_all(dir).unwrap();
-+    }
-+}
 diff --git a/crates/buzz-sdk/src/lib.rs b/crates/buzz-sdk/src/lib.rs
-index 4ee0cd4c..6582a0a4 100644
+index 4ee0cd4c8..6582a0a43 100644
 --- a/crates/buzz-sdk/src/lib.rs
 +++ b/crates/buzz-sdk/src/lib.rs
 @@ -13,6 +13,7 @@
  //! No keys are held here. No network calls are made.
- 
+
  pub mod builders;
 +pub mod identity;
  pub mod mentions;
  pub mod nip_oa;
- 
+

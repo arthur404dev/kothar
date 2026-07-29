@@ -12,5 +12,5 @@ func Lookup(name string) (Adapter, bool) {
 	if name != "buzz" {
 		return Adapter{}, false
 	}
-	return Adapter{Name: name, Command: "/usr/local/libexec/kothar/buzz-acp", Version: BuzzRevision, Revision: BuzzRevision, PatchSHA256: "9bea56aa02e8e89a3c5c35f42c415a8b4297528fd59c82424f6c1402316b5dbf", BinarySHA256: "fd7bbfbd7fa0fcb1d68623f9ba013d67bd8dde744fd15201652ffd0a34167f0a"}, true
+	return Adapter{Name: name, Command: "/usr/local/libexec/kothar/buzz-acp", Version: BuzzRevision, Revision: BuzzRevision, PatchSHA256: "5df36384bb968a440b46c6da0e4846add0bc8efe9d46aa04d96b47a211b1b67f", BinarySHA256: "02079ca1e591dfb888cb1c98bc451fc2a279b6bb9f9010782107c59567989fa9"}, true
 }

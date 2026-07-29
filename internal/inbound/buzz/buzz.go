@@ -11,8 +11,8 @@ import (
 
 const (
 	Revision        = inbound.BuzzRevision
-	PatchSHA256     = "9bea56aa02e8e89a3c5c35f42c415a8b4297528fd59c82424f6c1402316b5dbf"
-	ACPBinarySHA256 = "fd7bbfbd7fa0fcb1d68623f9ba013d67bd8dde744fd15201652ffd0a34167f0a"
+	PatchSHA256     = "5df36384bb968a440b46c6da0e4846add0bc8efe9d46aa04d96b47a211b1b67f"
+	ACPBinarySHA256 = "02079ca1e591dfb888cb1c98bc451fc2a279b6bb9f9010782107c59567989fa9"
 	CLIBinarySHA256 = "285d04b1ee3cb37b4231ff648559ab4f81272101d67cd8f4ae5aeb6a1b3d155d"
 )
 

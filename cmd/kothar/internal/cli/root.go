@@ -12,6 +12,7 @@ import (
 	"github.com/arthur404dev/kothar/internal/credentials"
 	deploy "github.com/arthur404dev/kothar/internal/deploy/systemd"
 	"github.com/arthur404dev/kothar/internal/engine"
+	enginepi "github.com/arthur404dev/kothar/internal/engine/pi"
 	"github.com/arthur404dev/kothar/internal/framework"
 	"github.com/arthur404dev/kothar/internal/inbound"
 	"github.com/arthur404dev/kothar/internal/manifest"
@@ -45,7 +46,10 @@ func (unavailableFactory) New(context.Context, engine.Agent, engine.Session) (en
 	return nil, framework.NewError(framework.EngineUnavailable, "engine unavailable", nil)
 }
 
-func New(version string) *cobra.Command { return newCommand(version, unavailableFactory{}) }
+func New(version string) *cobra.Command {
+	p, _ := xdg.Resolve()
+	return newCommand(version, enginepi.NewFactory(filepath.Join(p.State, "engine", "pi")))
+}
 func NewWithFactory(version string, factory engine.Factory) *cobra.Command {
 	return newCommand(version, factory)
 }
@@ -71,7 +75,10 @@ func (a *app) serveACP() *cobra.Command {
 		}
 		m := r.Manifest
 		system := string(r.Resources[m.Behavior.SystemPrompt])
-		svc := framework.New(engine.Agent{ID: m.ID, SystemPrompt: system, Models: engine.ModelPolicy{Primary: m.Models.Primary, Fallbacks: m.Models.Fallbacks, Thinking: m.Models.Thinking}, Tools: engine.ToolPolicy{Bundles: m.Tools.Bundles, Allow: m.Tools.Allow, Deny: m.Tools.Deny}}, a.factory)
+		for _, name := range append(m.Behavior.ContextFiles, m.Behavior.Skills...) {
+			system += "\n\n# " + name + "\n" + string(r.Resources[name])
+		}
+		svc := framework.New(engine.Agent{ID: m.ID, SystemPrompt: system, Resources: r.Resources, Models: engine.ModelPolicy{Primary: m.Models.Primary, Fallbacks: m.Models.Fallbacks, Thinking: m.Models.Thinking, MaxAttempts: m.Models.MaxAttempts}, Tools: engine.ToolPolicy{Bundles: m.Tools.Bundles, Allow: m.Tools.Allow, Deny: m.Tools.Deny}}, a.factory)
 		return (&acp.Server{In: c.InOrStdin(), Out: c.OutOrStdout(), Err: c.ErrOrStderr(), Service: svc}).Serve(c.Context())
 	}}
 	completeAgents(c, a)
@@ -205,7 +212,10 @@ func (a *app) plan(id string, r *loadedRecord, prev *deploy.Receipt, refresh boo
 	for name, b := range r.Resources {
 		arts = append(arts, deploy.Artifact{Path: "etc/kothar/agents/" + id + "/" + filepath.ToSlash(name), Mode: 0600, Category: "behavior", Content: b})
 	}
-	arts = append(arts, deploy.Artifact{Path: "etc/systemd/system/" + deploy.Unit(id) + ".d/10-kothar.conf", Mode: 0644, Category: "service", Content: []byte("# runtime artifacts supplied by tasks 4-6\n")})
+	piMeta, _ := json.Marshal(map[string]string{"command": "/usr/local/libexec/kothar/pi", "version": engine.PiVersion, "sha256": enginepi.CLIHash})
+	arts = append(arts,
+		deploy.Artifact{Path: "var/lib/kothar/agents/" + id + "/engine/pi/metadata.json", Mode: 0600, Category: "engine", Content: append(piMeta, '\n')},
+		deploy.Artifact{Path: "etc/systemd/system/" + deploy.Unit(id) + ".d/10-kothar.conf", Mode: 0644, Category: "service", Content: []byte("# Buzz/systemd binding supplied by task 6\n")})
 	return deploy.Build(id, r.Effective, prev, refresh, arts), nil
 }
 func (a *app) diff() *cobra.Command {

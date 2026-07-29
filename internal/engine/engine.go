@@ -7,11 +7,13 @@ type Agent struct {
 	ID, SystemPrompt string
 	Models           ModelPolicy
 	Tools            ToolPolicy
+	Resources        map[string][]byte
 }
 type ModelPolicy struct {
-	Primary   string
-	Fallbacks []string
-	Thinking  string
+	Primary     string
+	Fallbacks   []string
+	Thinking    string
+	MaxAttempts int
 }
 type ToolPolicy struct{ Bundles, Allow, Deny []string }
 type Session struct{ ID, CWD, SystemPrompt string }
@@ -21,6 +23,16 @@ type Request struct {
 }
 type Content struct{ Type, Text string }
 type Event struct{ Type, Text, ToolCallID, Status string }
+
+type Failure struct {
+	Class string
+	Safe  string
+	Err   error
+}
+
+func (e *Failure) Error() string { return e.Safe }
+func (e *Failure) Unwrap() error { return e.Err }
+
 type StopReason string
 
 const (

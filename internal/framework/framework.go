@@ -167,5 +167,14 @@ func normalize(err error) error {
 	if errors.As(err, &e) {
 		return err
 	}
+	var f *engine.Failure
+	if errors.As(err, &f) {
+		classes := map[string]ErrorClass{"auth": Auth, "policy": Policy, "provider": Provider, "timeout": Timeout, "cancel_timeout": CancelTimeout, "protocol": Protocol, "engine_unavailable": EngineUnavailable}
+		class := classes[f.Class]
+		if class == "" {
+			class = Internal
+		}
+		return NewError(class, f.Safe, err)
+	}
 	return NewError(EngineUnavailable, "engine unavailable", err)
 }

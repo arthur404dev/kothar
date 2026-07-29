@@ -1,19 +1,23 @@
-// Package acp owns generic ACP transport lifecycle and stdout discipline.
+// Package acp implements the generic ACP JSON-RPC stdin/stdout adapter.
 package acp
 
 import (
 	"context"
 	"io"
+	"time"
+
+	"github.com/arthur404dev/kothar/internal/framework"
 )
 
-type Request struct{ SessionID, Prompt string }
-type Event struct{ Kind, Text string }
-type Handler interface {
-	Run(context.Context, Request, func(Event) error) error
-	Cancel(string) error
-}
+const MaxLine = 10 << 20
+
 type Server struct {
-	In      io.Reader
-	Out     io.Writer
-	Handler Handler
+	In             io.Reader
+	Out            io.Writer
+	Err            io.Writer
+	Service        *framework.Service
+	RequestTimeout time.Duration
+	TurnTimeout    time.Duration
 }
+
+func (s *Server) Serve(ctx context.Context) error { return s.serve(ctx) }

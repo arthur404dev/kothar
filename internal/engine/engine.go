@@ -1,13 +1,42 @@
-// Package engine defines engine-independent execution and static capability contracts.
+// Package engine defines the contract implemented by execution engines.
 package engine
 
 import "context"
 
-type Request struct{ SessionID, Prompt string }
-type Event struct{ Kind, Text string }
-type Runner interface {
-	Run(context.Context, Request, func(Event) error) error
-	Cancel(string) error
+type Agent struct {
+	ID, SystemPrompt string
+	Models           ModelPolicy
+	Tools            ToolPolicy
+}
+type ModelPolicy struct {
+	Primary   string
+	Fallbacks []string
+	Thinking  string
+}
+type ToolPolicy struct{ Bundles, Allow, Deny []string }
+type Session struct{ ID, CWD, SystemPrompt string }
+type Request struct {
+	SessionID string
+	Content   []Content
+}
+type Content struct{ Type, Text string }
+type Event struct{ Type, Text, ToolCallID, Status string }
+type StopReason string
+
+const (
+	EndTurn         StopReason = "end_turn"
+	Cancelled       StopReason = "cancelled"
+	MaxTokens       StopReason = "max_tokens"
+	MaxTurnRequests StopReason = "max_turn_requests"
+	Refusal         StopReason = "refusal"
+)
+
+type SessionRunner interface {
+	Prompt(context.Context, Request, func(Event) error) (StopReason, error)
+	Close() error
+}
+type Factory interface {
+	New(context.Context, Agent, Session) (SessionRunner, error)
 }
 
 type Capability struct {
@@ -23,6 +52,5 @@ func Lookup(name string) (Capability, bool) {
 	}
 	return Capability{Name: name, Command: "/usr/local/libexec/kothar/pi", Version: PiVersion,
 		Providers: []string{"anthropic", "openai", "google", "github-copilot", "ollama"},
-		Bundles:   []string{"buzz", "workspace", "git"},
-		Tools:     []string{"read", "write", "edit", "bash", "grep", "find", "web_search", "fetch_content"}}, true
+		Bundles:   []string{"buzz", "workspace", "git"}, Tools: []string{"read", "write", "edit", "bash", "grep", "find", "web_search", "fetch_content"}}, true
 }

@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/arthur404dev/kothar/internal/acp"
 	"github.com/arthur404dev/kothar/internal/config"
 	"github.com/arthur404dev/kothar/internal/credentials"
 	deploy "github.com/arthur404dev/kothar/internal/deploy/systemd"
 	"github.com/arthur404dev/kothar/internal/engine"
+	"github.com/arthur404dev/kothar/internal/framework"
 	"github.com/arthur404dev/kothar/internal/inbound"
 	"github.com/arthur404dev/kothar/internal/manifest"
 	"github.com/arthur404dev/kothar/internal/records"
@@ -31,25 +33,49 @@ import (
 )
 
 type app struct {
-	paths  xdg.Paths
-	store  records.Store
-	runner deploy.Runner
+	paths   xdg.Paths
+	store   records.Store
+	runner  deploy.Runner
+	factory engine.Factory
 }
 
-func New(version string) *cobra.Command {
+type unavailableFactory struct{}
+
+func (unavailableFactory) New(context.Context, engine.Agent, engine.Session) (engine.SessionRunner, error) {
+	return nil, framework.NewError(framework.EngineUnavailable, "engine unavailable", nil)
+}
+
+func New(version string) *cobra.Command { return newCommand(version, unavailableFactory{}) }
+func NewWithFactory(version string, factory engine.Factory) *cobra.Command {
+	return newCommand(version, factory)
+}
+func newCommand(version string, factory engine.Factory) *cobra.Command {
 	p, _ := xdg.Resolve()
-	a := &app{p, records.Store{Config: p.Config, State: p.State}, deploy.ExecRunner{}}
+	a := &app{p, records.Store{Config: p.Config, State: p.State}, deploy.ExecRunner{}, factory}
 	if version == "" {
 		version = "dev"
 	}
 	r := &cobra.Command{Use: "kothar", Short: "Forge autonomous agents from declarative intent", Version: version, SilenceUsage: true, SilenceErrors: true, RunE: help}
 	r.AddCommand(a.agents(), a.engines(), a.adapters(), a.credentials(), a.config(), a.doctor(), completion(r))
 	serve := group("serve", "Run protocol endpoints")
-	serve.Hidden = true
-	serve.AddCommand(&cobra.Command{Use: "acp", Args: cobra.NoArgs, RunE: func(*cobra.Command, []string) error { return deploy.ErrRuntimeIncomplete }})
+	serve.AddCommand(a.serveACP())
 	r.AddCommand(serve)
 	carapace.Gen(r).Standalone()
 	return r
+}
+func (a *app) serveACP() *cobra.Command {
+	c := &cobra.Command{Use: "acp <id>", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, x []string) error {
+		r, err := a.load(x[0], nil)
+		if err != nil {
+			return err
+		}
+		m := r.Manifest
+		system := string(r.Resources[m.Behavior.SystemPrompt])
+		svc := framework.New(engine.Agent{ID: m.ID, SystemPrompt: system, Models: engine.ModelPolicy{Primary: m.Models.Primary, Fallbacks: m.Models.Fallbacks, Thinking: m.Models.Thinking}, Tools: engine.ToolPolicy{Bundles: m.Tools.Bundles, Allow: m.Tools.Allow, Deny: m.Tools.Deny}}, a.factory)
+		return (&acp.Server{In: c.InOrStdin(), Out: c.OutOrStdout(), Err: c.ErrOrStderr(), Service: svc}).Serve(c.Context())
+	}}
+	completeAgents(c, a)
+	return c
 }
 func (a *app) agents() *cobra.Command {
 	g := group("agent", "Manage agent records")

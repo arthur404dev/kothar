@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/arthur404dev/kothar/internal/config"
 	deploy "github.com/arthur404dev/kothar/internal/deploy/systemd"
+	"github.com/arthur404dev/kothar/internal/engine"
 	"github.com/arthur404dev/kothar/internal/records"
 	"github.com/arthur404dev/kothar/internal/xdg"
 	"github.com/spf13/cobra"
@@ -58,6 +60,50 @@ func TestNounHelpAndErrorsDeterministic(t *testing.T) {
 	_, err = run(t, "agent", "nope")
 	if err == nil || !strings.Contains(err.Error(), "unknown command") {
 		t.Fatalf("error: %v", err)
+	}
+}
+
+type cliFakeFactory struct{}
+type cliFakeRunner struct{}
+
+func (cliFakeFactory) New(context.Context, engine.Agent, engine.Session) (engine.SessionRunner, error) {
+	return cliFakeRunner{}, nil
+}
+func (cliFakeRunner) Prompt(_ context.Context, _ engine.Request, emit func(engine.Event) error) (engine.StopReason, error) {
+	_ = emit(engine.Event{Type: "agent_message_chunk", Text: "OK"})
+	return engine.EndTurn, nil
+}
+func (cliFakeRunner) Close() error { return nil }
+func TestServeACPComposition(t *testing.T) {
+	configDir, stateDir := t.TempDir(), t.TempDir()
+	t.Setenv("KOTHAR_CONFIG_DIR", configDir)
+	t.Setenv("KOTHAR_STATE_DIR", stateDir)
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"agent_defaults":{},"host_policy":{"allowed_mount_roots":[]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, "agent", "create", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(configDir, "agents", "alpha")
+	for _, name := range []string{"SYSTEM.md", "AGENTS.md", "CONSTRAINTS.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("safe\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "workspace"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := NewWithFactory("test", cliFakeFactory{})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	cmd.SetIn(strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}` + "\n" + `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s-1","prompt":[{"type":"text","text":"go"}]}}` + "\n"))
+	cmd.SetArgs([]string{"serve", "acp", "alpha"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"text":"OK"`) || !strings.Contains(out.String(), `"stopReason":"end_turn"`) {
+		t.Fatalf("stdout=%s", out.String())
 	}
 }
 func TestServeACPHelp(t *testing.T) {

@@ -35,8 +35,10 @@ func TestPackageBoundaries(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, imported := range pkg.Imports {
-			disallowed := strings.HasSuffix(pkg.ImportPath, "/internal/framework") && (strings.Contains(imported, "/internal/acp") || strings.Contains(imported, "/internal/engine/pi") || strings.Contains(imported, "/internal/inbound/buzz"))
+			framework := strings.HasSuffix(pkg.ImportPath, "/internal/framework")
+			disallowed := framework && (strings.Contains(imported, "/internal/acp") || strings.Contains(imported, "/internal/engine/pi") || strings.Contains(imported, "/internal/inbound/buzz") || strings.Contains(imported, "cobra") || strings.Contains(imported, "/deploy/systemd"))
 			disallowed = disallowed || strings.HasSuffix(pkg.ImportPath, "/internal/acp") && (strings.Contains(imported, "/internal/engine/pi") || strings.Contains(imported, "/internal/inbound/buzz"))
+			disallowed = disallowed || strings.HasSuffix(pkg.ImportPath, "/internal/engine") && (strings.Contains(imported, "/internal/acp") || strings.Contains(imported, "/internal/inbound/buzz"))
 			disallowed = disallowed || strings.HasSuffix(pkg.ImportPath, "/internal/engine/pi") && (strings.Contains(imported, "/internal/acp") || strings.Contains(imported, "/internal/inbound/buzz"))
 			if disallowed {
 				t.Fatalf("forbidden import: %s -> %s", pkg.ImportPath, imported)

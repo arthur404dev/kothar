@@ -1,0 +1,505 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/arthur404dev/kothar/schema/agent-v1.schema.json",
+  "title": "Kothar agent manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "id",
+    "profile",
+    "inbound",
+    "engine",
+    "models",
+    "behavior",
+    "tools",
+    "workspace",
+    "permissions",
+    "runtime"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "display_name",
+        "description",
+        "labels"
+      ],
+      "properties": {
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "labels": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+          }
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "credentials",
+        "options"
+      ],
+      "properties": {
+        "name": {
+          "const": "pi"
+        },
+        "credentials": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "overrides"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "inherit",
+                "custom",
+                "none"
+              ]
+            },
+            "overrides": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "anthropic": {
+                  "$ref": "#/$defs/ref"
+                },
+                "openai": {
+                  "$ref": "#/$defs/ref"
+                },
+                "google": {
+                  "$ref": "#/$defs/ref"
+                },
+                "github-copilot": {
+                  "$ref": "#/$defs/ref"
+                },
+                "ollama": {
+                  "$ref": "#/$defs/ref"
+                }
+              }
+            }
+          }
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "project_trust",
+            "telemetry",
+            "update_checks"
+          ],
+          "properties": {
+            "project_trust": {
+              "const": "never"
+            },
+            "telemetry": {
+              "type": "boolean"
+            },
+            "update_checks": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary",
+        "fallbacks",
+        "thinking",
+        "max_attempts"
+      ],
+      "properties": {
+        "primary": {
+          "$ref": "#/$defs/model"
+        },
+        "fallbacks": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/model"
+          }
+        },
+        "thinking": {
+          "enum": [
+            "off",
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      }
+    },
+    "behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system_prompt",
+        "context_files",
+        "skills",
+        "extensions"
+      ],
+      "properties": {
+        "system_prompt": {
+          "$ref": "#/$defs/path"
+        },
+        "context_files": {
+          "$ref": "#/$defs/paths"
+        },
+        "skills": {
+          "$ref": "#/$defs/paths"
+        },
+        "extensions": {
+          "$ref": "#/$defs/paths"
+        }
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundles",
+        "allow",
+        "deny",
+        "credentials"
+      ],
+      "properties": {
+        "bundles": {
+          "$ref": "#/$defs/bundles"
+        },
+        "allow": {
+          "$ref": "#/$defs/tools"
+        },
+        "deny": {
+          "$ref": "#/$defs/tools"
+        },
+        "credentials": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read": {
+              "$ref": "#/$defs/ref"
+            },
+            "write": {
+              "$ref": "#/$defs/ref"
+            },
+            "edit": {
+              "$ref": "#/$defs/ref"
+            },
+            "bash": {
+              "$ref": "#/$defs/ref"
+            },
+            "grep": {
+              "$ref": "#/$defs/ref"
+            },
+            "find": {
+              "$ref": "#/$defs/ref"
+            },
+            "web_search": {
+              "$ref": "#/$defs/ref"
+            },
+            "fetch_content": {
+              "$ref": "#/$defs/ref"
+            }
+          }
+        }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "mounts"
+      ],
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/path"
+        },
+        "mounts": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "target",
+              "mode"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^/",
+                "allOf": [
+                  {
+                    "not": {
+                      "pattern": "\\\\"
+                    }
+                  },
+                  {
+                    "not": {
+                      "pattern": "(^|/)\\.\\.(/|$)"
+                    }
+                  }
+                ]
+              },
+              "target": {
+                "$ref": "#/$defs/path"
+              },
+              "mode": {
+                "enum": [
+                  "read_only",
+                  "read_write"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "network",
+        "resources"
+      ],
+      "properties": {
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "full",
+                "none"
+              ]
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "memory_max_mb",
+            "cpu_quota_percent",
+            "tasks_max"
+          ],
+          "properties": {
+            "memory_max_mb": {
+              "type": "integer",
+              "minimum": 64,
+              "maximum": 1048576
+            },
+            "cpu_quota_percent": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "tasks_max": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1048576
+            }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "driver",
+        "start_on_boot",
+        "restart",
+        "workers"
+      ],
+      "properties": {
+        "driver": {
+          "const": "systemd"
+        },
+        "start_on_boot": {
+          "type": "boolean"
+        },
+        "restart": {
+          "enum": [
+            "no",
+            "on-failure",
+            "always"
+          ]
+        },
+        "workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      }
+    },
+    "inbound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "options"
+      ],
+      "properties": {
+        "name": {
+          "const": "buzz"
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relay",
+            "identity_credential",
+            "respond_to",
+            "heartbeat_seconds"
+          ],
+          "properties": {
+            "relay": {
+              "type": "string",
+              "pattern": "^wss://"
+            },
+            "identity_credential": {
+              "$ref": "#/$defs/ref"
+            },
+            "respond_to": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "pubkeys"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "nobody",
+                    "allowlist",
+                    "anyone"
+                  ]
+                },
+                "pubkeys": {
+                  "type": "array",
+                  "maxItems": 256,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            },
+            "heartbeat_seconds": {
+              "type": "integer",
+              "minimum": 30,
+              "maximum": 86400
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "model": {
+      "type": "string",
+      "pattern": "^(anthropic|openai|google|github-copilot|ollama)/[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[^/\\\\]",
+      "allOf": [
+        {
+          "not": {
+            "pattern": "(^|/)\\.\\.(/|$)"
+          }
+        },
+        {
+          "not": {
+            "pattern": "\\\\"
+          }
+        }
+      ]
+    },
+    "paths": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/path"
+      }
+    },
+    "bundles": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "buzz",
+          "workspace",
+          "git"
+        ]
+      }
+    },
+    "tools": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "read",
+          "write",
+          "edit",
+          "bash",
+          "grep",
+          "find",
+          "web_search",
+          "fetch_content"
+        ]
+      }
+    }
+  }
+}

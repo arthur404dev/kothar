@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "id": "atlas",
+  "profile": {"display_name": "Atlas", "description": "Research and engineering assistant", "labels": ["buzz", "research"]},
+  "inbound": {"name": "buzz", "options": {"relay": "wss://buzz.4o4.one", "identity_credential": "buzz-atlas", "respond_to": {"mode": "nobody", "pubkeys": []}, "heartbeat_seconds": 300}},
+  "engine": {"name": "pi", "credentials": {"mode": "inherit", "overrides": {}}, "options": {"project_trust": "never", "telemetry": false, "update_checks": false}},
+  "models": {"primary": "anthropic/claude-sonnet-4-6", "fallbacks": ["openai/gpt-5.4"], "thinking": "high", "max_attempts": 2},
+  "behavior": {"system_prompt": "SYSTEM.md", "context_files": ["AGENTS.md", "CONSTRAINTS.md"], "skills": ["skills/research"], "extensions": []},
+  "tools": {"bundles": ["buzz", "workspace", "git"], "allow": [], "deny": [], "credentials": {}},
+  "workspace": {"root": "workspace", "mounts": []},
+  "permissions": {"network": {"mode": "full"}, "resources": {"memory_max_mb": 4096, "cpu_quota_percent": 200, "tasks_max": 512}},
+  "runtime": {"driver": "systemd", "start_on_boot": true, "restart": "always", "workers": 1}
+}

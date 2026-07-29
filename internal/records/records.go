@@ -40,8 +40,12 @@ func (s Store) Create(id string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	if _, err = manifest.DecodeBytes(data); err != nil {
+	m, err := manifest.DecodeBytes(data)
+	if err != nil {
 		return err
+	}
+	if m.ID != id {
+		return fmt.Errorf("manifest id %q does not match target agent %q", m.ID, id)
 	}
 	if err = securefs.EnsureDir(s.Agents(), 0700); err != nil {
 		return err
@@ -104,8 +108,19 @@ func (s Store) List() ([]string, error) {
 	return out, nil
 }
 func (s Store) Delete(id string) error {
-	if _, e := os.Stat(s.Receipt(id)); e == nil {
+	if b, _, e := securefs.ReadFile(filepath.Dir(s.Receipt(id)), filepath.Base(s.Receipt(id)), manifest.MaxBytes); e == nil {
+		var receipt struct {
+			AgentID string `json:"agent_id"`
+		}
+		if e = json.Unmarshal(b, &receipt); e != nil {
+			return e
+		}
+		if receipt.AgentID != id {
+			return fmt.Errorf("receipt agent id %q does not match requested agent %q", receipt.AgentID, id)
+		}
 		return ErrDeployed
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return e
 	}
 	d, e := s.Dir(id)
 	if e != nil {

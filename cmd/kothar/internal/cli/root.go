@@ -70,7 +70,11 @@ func (a *app) agents() *cobra.Command {
 		}))
 	}
 	g.AddCommand(a.agentCmd("remove", func(c *cobra.Command, id string) error {
-		if _, e := os.Stat(a.store.Receipt(id)); errors.Is(e, os.ErrNotExist) {
+		receipt, e := a.receipt(id)
+		if e != nil {
+			return e
+		}
+		if receipt == nil {
 			return nil
 		}
 		if _, e := deploy.Service(c.Context(), a.runner, id, "stop"); e != nil {
@@ -163,6 +167,13 @@ func (a *app) render() *cobra.Command {
 		return map[string]any{"effective": r.Manifest, "plan": p}, e
 	})
 }
+func (a *app) receipt(id string) (*deploy.Receipt, error) {
+	r, err := deploy.LoadReceipt(a.store.Receipt(id), id)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return r, err
+}
 func (a *app) plan(id string, r *loadedRecord, prev *deploy.Receipt, refresh bool) (deploy.Plan, error) {
 	arts := []deploy.Artifact{{Path: "etc/kothar/agents/" + id + "/agent.json", Mode: 0600, Category: "config", Content: r.Effective}}
 	for name, b := range r.Resources {
@@ -177,15 +188,18 @@ func (a *app) diff() *cobra.Command {
 		if e != nil {
 			return nil, e
 		}
-		var prev *deploy.Receipt
-		if r, er := deploy.LoadReceipt(a.store.Receipt(x[0])); er == nil {
-			prev = r
+		prev, e := a.receipt(x[0])
+		if e != nil {
+			return nil, e
 		}
 		return a.plan(x[0], r, prev, false)
 	})
 }
 func (a *app) apply() *cobra.Command {
 	c := a.agentCmd("apply", func(c *cobra.Command, id string) error {
+		if _, e := a.receipt(id); e != nil {
+			return e
+		}
 		roots, _ := c.Flags().GetStringSlice("allow-mount-root")
 		r, e := a.load(id, roots)
 		if e != nil {
@@ -220,6 +234,9 @@ func (a *app) apply() *cobra.Command {
 }
 func (a *app) status() *cobra.Command {
 	return a.jsonCmd("status <id>", cobra.ExactArgs(1), func(x []string) (any, error) {
+		if _, e := a.receipt(x[0]); e != nil {
+			return nil, e
+		}
 		out, e := deploy.Service(context.Background(), a.runner, x[0], "status")
 		if e != nil {
 			return nil, e

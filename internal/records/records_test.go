@@ -10,6 +10,12 @@ func TestCreateAtomicModesAndSymlink(t *testing.T) {
 	root := t.TempDir()
 	s := Store{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state")}
 	data := []byte(`{"version":1,"id":"agent","profile":{"display_name":"Agent","description":"","labels":[]},"inbound":{"name":"buzz","options":{"relay":"wss://buzz.4o4.one","identity_credential":"buzz-agent","respond_to":{"mode":"nobody","pubkeys":[]},"heartbeat_seconds":300}},"engine":{"name":"pi","credentials":{"mode":"inherit","overrides":{}},"options":{"project_trust":"never","telemetry":false,"update_checks":false}},"models":{"primary":"anthropic/model","fallbacks":[],"thinking":"low","max_attempts":1},"behavior":{"system_prompt":"SYSTEM.md","context_files":["AGENTS.md","CONSTRAINTS.md"],"skills":[],"extensions":[]},"tools":{"bundles":[],"allow":[],"deny":[],"credentials":{}},"workspace":{"root":"workspace","mounts":[]},"permissions":{"network":{"mode":"full"},"resources":{"memory_max_mb":64,"cpu_quota_percent":1,"tasks_max":1}},"runtime":{"driver":"systemd","start_on_boot":false,"restart":"no","workers":1}}`)
+	if err := s.Create("other", data); err == nil {
+		t.Fatal("created record whose manifest id differs from target")
+	}
+	if _, err := os.Stat(filepath.Join(s.Config, "agents", "other")); !os.IsNotExist(err) {
+		t.Fatal("mismatched record mutated store")
+	}
 	if err := s.Create("agent", data); err != nil {
 		t.Fatal(err)
 	}
@@ -27,5 +33,27 @@ func TestCreateAtomicModesAndSymlink(t *testing.T) {
 	}
 	if _, err := s.Read("agent"); err == nil {
 		t.Fatal("followed symlink")
+	}
+}
+
+func TestDeleteRejectsMismatchedReceiptBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	s := Store{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state")}
+	d, _ := s.Dir("agent")
+	if err := os.MkdirAll(d, 0700); err != nil {
+		t.Fatal(err)
+	}
+	receipt := s.Receipt("agent")
+	if err := os.MkdirAll(filepath.Dir(receipt), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receipt, []byte(`{"agent_id":"other"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete("agent"); err == nil {
+		t.Fatal("accepted mismatched receipt")
+	}
+	if _, err := os.Stat(d); err != nil {
+		t.Fatal("record mutated despite mismatched receipt")
 	}
 }

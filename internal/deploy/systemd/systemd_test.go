@@ -3,7 +3,10 @@ package systemd
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+
+	"github.com/arthur404dev/kothar/internal/records"
 )
 
 func TestFixtureApplyIdempotentAndRollback(t *testing.T) {
@@ -14,7 +17,7 @@ func TestFixtureApplyIdempotentAndRollback(t *testing.T) {
 	if err := ApplyFixture(root, receipt, p, -1); err != nil {
 		t.Fatal(err)
 	}
-	r, err := LoadReceipt(receipt)
+	r, err := LoadReceipt(receipt, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +54,44 @@ func TestFixtureApplyIdempotentAndRollback(t *testing.T) {
 	fi, _ := os.Stat(filepath.Join(root, "etc/kothar/a"))
 	if fi.Mode().Perm() != 0600 {
 		t.Fatalf("mode rollback: %o", fi.Mode().Perm())
+	}
+}
+
+func TestReceiptIdentityAndOwnershipRollback(t *testing.T) {
+	root := t.TempDir()
+	receipt := filepath.Join(t.TempDir(), "receipt.json")
+	initial := Receipt{AgentID: "a", Artifacts: []Artifact{}}
+	if err := os.WriteFile(receipt, records.Marshal(initial), 0640); err != nil {
+		t.Fatal(err)
+	}
+	wantUID, wantGID := os.Geteuid(), os.Getegid()
+	if os.Geteuid() == 0 {
+		wantUID, wantGID = 1, 1
+		if err := os.Chown(receipt, wantUID, wantGID); err != nil {
+			t.Fatalf("root chown fixture: %v", err)
+		}
+	} else if groups, err := os.Getgroups(); err == nil {
+		for _, gid := range groups {
+			if gid != wantGID && os.Chown(receipt, wantUID, gid) == nil {
+				wantGID = gid
+				break
+			}
+		}
+	}
+	plan := Build("a", []byte("changed"), &initial, false, []Artifact{{Path: "changed", Mode: 0600, Category: "config", Content: []byte("changed")}, {Path: "fail", Mode: 0600, Category: "config", Content: []byte("fail")}})
+	if err := ApplyFixture(root, receipt, plan, 1); err == nil {
+		t.Fatal("expected injected failure")
+	}
+	fi, err := os.Stat(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	if int(st.Uid) != wantUID || int(st.Gid) != wantGID || fi.Mode().Perm() != 0640 {
+		t.Fatalf("receipt metadata = %d:%d %o, want %d:%d 640", st.Uid, st.Gid, fi.Mode().Perm(), wantUID, wantGID)
+	}
+	if _, err = LoadReceipt(receipt, "b"); err == nil {
+		t.Fatal("accepted receipt for another agent")
 	}
 }
 func TestUnitEscape(t *testing.T) {

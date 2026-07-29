@@ -9,6 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arthur404dev/kothar/internal/config"
+	deploy "github.com/arthur404dev/kothar/internal/deploy/systemd"
+	"github.com/arthur404dev/kothar/internal/records"
+	"github.com/arthur404dev/kothar/internal/xdg"
 	"github.com/spf13/cobra"
 )
 
@@ -105,6 +109,45 @@ func TestCreateCopiesDefaultsOnceAndRejectsAliasedRecord(t *testing.T) {
 	}
 	if _, err := run(t, "agent", "show", "alias", "--json"); err == nil {
 		t.Fatal("symlinked agent directory accepted")
+	}
+}
+
+type countingRunner struct{ calls int }
+
+func (r *countingRunner) Run(context.Context, string, ...string) ([]byte, error) {
+	r.calls++
+	return []byte("ActiveState=active\n"), nil
+}
+
+func TestReceiptMismatchFailsClosedForAgentCommands(t *testing.T) {
+	root := t.TempDir()
+	paths := xdg.Paths{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state"), Cache: filepath.Join(root, "cache")}
+	store := records.Store{Config: paths.Config, State: paths.State}
+	if err := store.Create("agent", defaultManifest("agent", config.Config{})); err != nil {
+		t.Fatal(err)
+	}
+	receipt := store.Receipt("agent")
+	if err := os.MkdirAll(filepath.Dir(receipt), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receipt, records.Marshal(deploy.Receipt{AgentID: "other", Artifacts: []deploy.Artifact{}}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &countingRunner{}
+	a := &app{paths: paths, store: store, runner: runner}
+	for _, name := range []string{"diff", "apply", "status", "remove", "delete"} {
+		cmd := a.agents()
+		cmd.SetOut(new(bytes.Buffer))
+		cmd.SetArgs([]string{name, "agent"})
+		if err := cmd.ExecuteContext(context.Background()); err == nil || !strings.Contains(err.Error(), "does not match requested agent") {
+			t.Fatalf("%s accepted mismatched receipt: %v", name, err)
+		}
+	}
+	if runner.calls != 0 {
+		t.Fatalf("service mutated before receipt validation: %d calls", runner.calls)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Config, "agents", "agent")); err != nil {
+		t.Fatal("record deleted before receipt validation")
 	}
 }
 

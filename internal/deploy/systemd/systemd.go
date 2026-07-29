@@ -99,7 +99,7 @@ func Build(id string, effective []byte, previous *Receipt, refresh bool, arts []
 	}
 	return Plan{AgentID: id, EffectiveHash: Hash(effective), Categories: cats, RefreshCredentials: refresh, Artifacts: arts, Removed: removed}
 }
-func LoadReceipt(path string) (*Receipt, error) {
+func LoadReceipt(path, agentID string) (*Receipt, error) {
 	b, _, e := securefs.ReadFile(filepath.Dir(path), filepath.Base(path), 1<<20)
 	if e != nil {
 		return nil, e
@@ -120,6 +120,9 @@ func LoadReceipt(path string) (*Receipt, error) {
 	if r.AgentID == "" || r.Artifacts == nil {
 		return nil, fmt.Errorf("invalid receipt")
 	}
+	if r.AgentID != agentID {
+		return nil, fmt.Errorf("receipt agent id %q does not match requested agent %q", r.AgentID, agentID)
+	}
 	return &r, nil
 }
 
@@ -133,9 +136,13 @@ func ApplyFixture(root, receiptPath string, p Plan, failAfter int) error {
 	backups := map[string]backup{}
 	created := []string{}
 	written := 0
-	receipt, receiptMode, receiptExists := []byte(nil), os.FileMode(0600), false
+	receipt, receiptMode, receiptUID, receiptGID, receiptExists := []byte(nil), os.FileMode(0600), 0, 0, false
 	if b, fi, e := securefs.ReadFile(filepath.Dir(receiptPath), filepath.Base(receiptPath), 1<<20); e == nil {
-		receipt, receiptMode, receiptExists = b, fi.Mode().Perm(), true
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("receipt ownership unavailable")
+		}
+		receipt, receiptMode, receiptUID, receiptGID, receiptExists = b, fi.Mode().Perm(), int(st.Uid), int(st.Gid), true
 	}
 	rollback := func() {
 		for path, b := range backups {
@@ -148,6 +155,8 @@ func ApplyFixture(root, receiptPath string, p Plan, failAfter int) error {
 		}
 		if receiptExists {
 			_ = records.AtomicWrite(receiptPath, receipt, receiptMode)
+			_ = os.Chown(receiptPath, receiptUID, receiptGID)
+			_ = os.Chmod(receiptPath, receiptMode)
 		} else {
 			_ = os.Remove(receiptPath)
 		}

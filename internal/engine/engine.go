@@ -15,7 +15,14 @@ type Capability struct {
 	Providers, Tools, Bundles []string
 }
 
-var engines = map[string]Capability{}
+const PiVersion = "0.82.1"
 
-func Register(capability Capability)        { engines[capability.Name] = capability }
-func Lookup(name string) (Capability, bool) { capability, ok := engines[name]; return capability, ok }
+func Lookup(name string) (Capability, bool) {
+	if name != "pi" {
+		return Capability{}, false
+	}
+	return Capability{Name: name, Command: "/usr/local/libexec/kothar/pi", Version: PiVersion,
+		Providers: []string{"anthropic", "openai", "google", "github-copilot", "ollama"},
+		Bundles:   []string{"buzz", "workspace", "git"},
+		Tools:     []string{"read", "write", "edit", "bash", "grep", "find", "web_search", "fetch_content"}}, true
+}

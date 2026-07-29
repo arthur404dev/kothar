@@ -5,7 +5,11 @@ type Adapter struct {
 	Name, Command, Version, Revision string
 }
 
-var adapters = map[string]Adapter{}
+const BuzzRevision = "7dfea2634f7e87f6a42f5fc1f22d9f77c648abfc"
 
-func Register(adapter Adapter)           { adapters[adapter.Name] = adapter }
-func Lookup(name string) (Adapter, bool) { adapter, ok := adapters[name]; return adapter, ok }
+func Lookup(name string) (Adapter, bool) {
+	if name != "buzz" {
+		return Adapter{}, false
+	}
+	return Adapter{Name: name, Command: "/usr/local/libexec/kothar/buzz-acp", Version: BuzzRevision, Revision: BuzzRevision}, true
+}

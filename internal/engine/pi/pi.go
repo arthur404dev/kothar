@@ -23,17 +23,18 @@ import (
 )
 
 const (
-	Version = engine.PiVersion
-	CLIHash = "af302f231437eaf6f37691bce4b34234fcb626bcb5eb3910d4fc3f6519bf78ca"
-	maxLine = 10 << 20
+	Version  = engine.PiVersion
+	CLIHash  = "af302f231437eaf6f37691bce4b34234fcb626bcb5eb3910d4fc3f6519bf78ca"
+	NodeHash = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
+	maxLine  = 10 << 20
 )
 
 type Factory struct {
-	Root, Executable, BuzzPath, ExpectedHash string
+	Root, Interpreter, Executable, BuzzPath, ExpectedHash string
 }
 
 func NewFactory(root string) *Factory {
-	return &Factory{Root: root, Executable: "/usr/local/libexec/kothar/pi", BuzzPath: "/usr/local/libexec/kothar/buzz", ExpectedHash: CLIHash}
+	return &Factory{Root: root, Interpreter: "/usr/local/libexec/kothar/node", Executable: "/usr/local/libexec/kothar/pi", BuzzPath: "/usr/local/libexec/kothar/buzz", ExpectedHash: CLIHash}
 }
 func Capability() engine.Capability { capability, _ := engine.Lookup("pi"); return capability }
 
@@ -84,6 +85,7 @@ type packet struct {
 	Data      json.RawMessage `json:"data"`
 	Assistant json.RawMessage `json:"assistantMessageEvent"`
 	Message   struct {
+		Role         string `json:"role"`
 		StopReason   string `json:"stopReason"`
 		ErrorMessage string `json:"errorMessage"`
 	} `json:"message"`
@@ -163,7 +165,7 @@ func (r *runner) attempt(ctx context.Context, model string, req engine.Request, 
 		return "", false, false, err
 	}
 	visible, sideEffect := false, false
-	lastStop := engine.EndTurn
+	var lastStop engine.StopReason
 	for {
 		select {
 		case <-ctx.Done():
@@ -212,12 +214,12 @@ func (r *runner) attempt(ctx context.Context, model string, req engine.Request, 
 				switch e.Type {
 				case "text_delta":
 					visible = true
-					if err := emit(engine.Event{Type: "text_delta", Text: e.Delta}); err != nil {
+					if err := emit(engine.Event{Type: "agent_message_chunk", Text: e.Delta}); err != nil {
 						return "", visible, sideEffect, err
 					}
 				case "thinking_delta":
 					visible = true
-					if err := emit(engine.Event{Type: "thought_delta", Text: e.Delta}); err != nil {
+					if err := emit(engine.Event{Type: "agent_thought_chunk", Text: e.Delta}); err != nil {
 						return "", visible, sideEffect, err
 					}
 				case "tool_execution_start", "tool_call_start":
@@ -238,8 +240,18 @@ func (r *runner) attempt(ctx context.Context, model string, req engine.Request, 
 					return "", visible, sideEffect, err
 				}
 			case "message_end":
-				lastStop = stopReason(p.Message.StopReason)
+				if p.Message.Role == "assistant" || p.Message.Role == "" { // Empty role keeps fixture compatibility.
+					var err error
+					lastStop, err = stopReason(p.Message.StopReason)
+					if err != nil {
+						r.stop()
+						return "", visible, sideEffect, err
+					}
+				}
 			case "agent_settled":
+				if lastStop == "" {
+					return "", visible, sideEffect, fail("protocol", "Pi omitted stop reason", nil)
+				}
 				return lastStop, visible, sideEffect, nil
 			}
 		}
@@ -277,7 +289,14 @@ func (r *runner) start(model string) (*child, error) {
 	if len(r.agent.Tools.Deny) > 0 {
 		args = append(args, "--exclude-tools", strings.Join(r.agent.Tools.Deny, ","))
 	}
-	cmd := exec.Command(r.factory.Executable, args...)
+	command, commandArgs := r.factory.Executable, args
+	if r.factory.Interpreter != "" {
+		if err := verifyFile(r.factory.Interpreter, NodeHash); err != nil {
+			return nil, err
+		}
+		command, commandArgs = r.factory.Interpreter, append([]string{r.factory.Executable}, args...)
+	}
+	cmd := exec.Command(command, commandArgs...)
 	cmd.Dir = r.session.CWD
 	cmd.Env = []string{"HOME=" + home, "PI_CODING_AGENT_DIR=" + piDir, "PI_TELEMETRY=0", "KOTHAR_BUZZ_CLI=" + r.factory.BuzzPath, "PATH=/usr/bin:/bin"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -300,22 +319,16 @@ func (r *runner) start(model string) (*child, error) {
 	return c, nil
 }
 func scan(rd io.Reader, out chan<- line) {
-	br := bufio.NewReaderSize(rd, 64<<10)
-	for {
-		b, err := br.ReadString('\n')
-		if len(b) > maxLine {
+	s := bufio.NewScanner(rd)
+	s.Buffer(make([]byte, 64<<10), maxLine+1)
+	for s.Scan() {
+		if len(s.Bytes()) > maxLine {
 			out <- line{err: fmt.Errorf("protocol line exceeds limit")}
 			return
 		}
-		if len(b) > 0 {
-			b = strings.TrimSuffix(strings.TrimSuffix(b, "\n"), "\r")
-			out <- line{raw: []byte(b)}
-		}
-		if err != nil {
-			out <- line{err: err}
-			return
-		}
+		out <- line{raw: append([]byte(nil), s.Bytes()...)}
 	}
+	out <- line{err: s.Err()}
 }
 func (r *runner) send(v any) error {
 	b, _ := json.Marshal(v)
@@ -329,22 +342,31 @@ func (r *runner) stop() {
 	if r.child == nil {
 		return
 	}
-	_ = r.child.in.Close()
+	c := r.child
+	_ = c.in.Close()
+	done := false
 	select {
-	case <-r.child.done:
-	case <-time.After(time.Second):
-		_ = syscall.Kill(-r.child.cmd.Process.Pid, syscall.SIGTERM)
+	case <-c.done:
+		done = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	// The process group may outlive an already-exited parent.
+	_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGTERM)
+	if !done {
 		select {
-		case <-r.child.done:
+		case <-c.done:
+			done = true
 		case <-time.After(time.Second):
-			_ = syscall.Kill(-r.child.cmd.Process.Pid, syscall.SIGKILL)
-			<-r.child.done
 		}
+	}
+	if !done {
+		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL)
+		<-c.done
 	}
 	r.child = nil
 }
 func (r *runner) Close() error { r.mu.Lock(); defer r.mu.Unlock(); r.stop(); return nil }
-func verify(path, expected string) error {
+func verifyFile(path, expected string) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return fail("engine_unavailable", "reviewed Pi executable unavailable", err)
@@ -358,18 +380,32 @@ func verify(path, expected string) error {
 	}
 	return nil
 }
-func stopReason(value string) engine.StopReason {
+func verify(path, expected string) error {
+	if err := verifyFile(path, expected); err != nil {
+		return err
+	}
+	if expected == CLIHash {
+		asset := filepath.Join(filepath.Dir(path), "dist", "modes", "interactive", "theme", "dark.json")
+		if fi, err := os.Stat(asset); err != nil || !fi.Mode().IsRegular() {
+			return fail("engine_unavailable", "reviewed Pi installation incomplete", err)
+		}
+	}
+	return nil
+}
+func stopReason(value string) (engine.StopReason, error) {
 	switch strings.ToLower(strings.ReplaceAll(value, "-", "_")) {
+	case "stop", "end_turn":
+		return engine.EndTurn, nil
 	case "max_tokens", "length":
-		return engine.MaxTokens
+		return engine.MaxTokens, nil
 	case "max_turn_requests":
-		return engine.MaxTurnRequests
+		return engine.MaxTurnRequests, nil
 	case "refusal":
-		return engine.Refusal
+		return engine.Refusal, nil
 	case "cancelled", "aborted":
-		return engine.Cancelled
+		return engine.Cancelled, nil
 	default:
-		return engine.EndTurn
+		return "", fail("protocol", "Pi returned invalid stop reason", nil)
 	}
 }
 func retryable(err error) bool {

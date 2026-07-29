@@ -39,7 +39,7 @@ func session(t *testing.T, f *Factory, a engine.Agent) engine.SessionRunner {
 
 func TestSuccessAndCleanup(t *testing.T) {
 	f := fixture(t, `while IFS= read -r line; do
-case "$line" in *get_state*|*get_available_models*) printf '%s\n' '{"type":"response","success":true}' ;; *prompt*) printf '%s\n' '{"type":"response","success":true}' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"OK"}}' '{"type":"agent_settled"}' ;; esac
+case "$line" in *get_state*|*get_available_models*) printf '%s\n' '{"type":"response","success":true}' ;; *prompt*) printf '%s\n' '{"type":"response","success":true}' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"OK"}}' '{"type":"message_end","message":{"stopReason":"stop"}}' '{"type":"agent_settled"}' ;; esac
 done
 `)
 	r := session(t, f, agent("local/test"))

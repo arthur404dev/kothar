@@ -32,7 +32,7 @@ func TestPrepareAuthSelectivePreserveAndRefresh(t *testing.T) {
 	if err := Prepare(filepath.Join(root, "state"), a, "/fixed/buzz"); err != nil {
 		t.Fatal(err)
 	}
-	assertAuthKeys(t, dst, "openai", "custom")
+	assertAuthKeys(t, dst, "openai")
 	if fi, err := os.Stat(dst); err != nil || fi.Mode().Perm() != 0600 {
 		t.Fatalf("mode: %v %v", fi, err)
 	}

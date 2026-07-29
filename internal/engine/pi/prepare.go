@@ -108,12 +108,6 @@ func prepareAuth(dst string, a engine.Agent) error {
 		return err
 	}
 	current := map[string]json.RawMessage{}
-	if a.Credentials.Refresh {
-		current, err = readObject(dst)
-		if err != nil {
-			return err
-		}
-	}
 	switch a.Credentials.Mode {
 	case "": // Direct engine users may supply credentials by other isolated means.
 	case "inherit":

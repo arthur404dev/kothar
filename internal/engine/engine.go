@@ -71,6 +71,6 @@ func Lookup(name string) (Capability, bool) {
 		return Capability{}, false
 	}
 	return Capability{Name: name, Command: "/usr/local/libexec/kothar/pi", Version: PiVersion,
-		Providers: []string{"anthropic", "openai", "google", "github-copilot", "ollama"},
+		Providers: []string{"anthropic", "openai", "openai-codex", "google", "github-copilot", "ollama"},
 		Bundles:   []string{"buzz", "workspace", "git"}, Tools: []string{"read", "write", "edit", "bash", "grep", "find", "web_search", "fetch_content"}}, true
 }

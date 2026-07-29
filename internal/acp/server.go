@@ -174,6 +174,9 @@ func mapEvent(id string, e framework.Event) any {
 	switch e.Type {
 	case "agent_message_chunk", "agent_thought_chunk":
 		u["content"] = map[string]string{"type": "text", "text": e.Text}
+	case "attempt":
+		u["model"] = e.Model
+		u["status"] = e.Status
 	case "tool_call", "tool_call_update":
 		u["toolCallId"] = e.ToolCallID
 		u["status"] = e.Status

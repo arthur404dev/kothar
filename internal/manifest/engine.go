@@ -26,7 +26,7 @@ var engines = map[string]EngineCapability{
 		Executables: map[string]Executable{
 			"pi": {Identity: "pi", Command: "/usr/local/libexec/kothar/pi", Version: "0.82.1"},
 		},
-		Providers:       set("anthropic", "openai", "google", "github-copilot", "ollama"),
+		Providers:       set("anthropic", "openai", "openai-codex", "google", "github-copilot", "ollama"),
 		Unauthenticated: set("ollama"),
 		Bundles:         set("buzz", "workspace", "git"),
 		Tools:           set("read", "write", "edit", "bash", "grep", "find", "web_search", "fetch_content"),

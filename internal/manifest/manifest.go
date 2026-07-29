@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -111,6 +113,8 @@ type RespondTo struct {
 	Mode    string   `json:"mode"`
 	Pubkeys []string `json:"pubkeys"`
 }
+
+func DecodeBytes(data []byte) (*Manifest, error) { return Decode(bytes.NewReader(data)) }
 
 func Decode(r io.Reader) (*Manifest, error) {
 	data, err := io.ReadAll(io.LimitReader(r, MaxBytes+1))
@@ -403,6 +407,50 @@ func (m Manifest) Validate() error {
 	}
 	return nil
 }
+
+// ValidateResources checks record-relative resources and host mount policy without mutation.
+func (m Manifest) ValidateResources(recordDir string, allowedMountRoots []string) error {
+	for _, rel := range append(append(append([]string{m.Behavior.SystemPrompt}, m.Behavior.ContextFiles...), m.Behavior.Skills...), m.Behavior.Extensions...) {
+		p := filepath.Join(recordDir, filepath.FromSlash(rel))
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return fmt.Errorf("resource %s: %w", rel, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("resource %s is a symlink", rel)
+		}
+		resolved, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			return err
+		}
+		relcheck, err := filepath.Rel(recordDir, resolved)
+		if err != nil || relcheck == ".." || strings.HasPrefix(relcheck, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("resource escapes record")
+		}
+	}
+	for _, mount := range m.Workspace.Mounts {
+		fi, err := os.Lstat(mount.Source)
+		if err != nil {
+			return fmt.Errorf("mount source: %w", err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("mount source is a symlink")
+		}
+		allowed := false
+		for _, root := range allowedMountRoots {
+			rel, err := filepath.Rel(root, mount.Source)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("mount source outside allowed roots")
+		}
+	}
+	return nil
+}
+
 func oneOf(v string, values ...string) bool {
 	for _, x := range values {
 		if v == x {

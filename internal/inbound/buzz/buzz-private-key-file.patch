@@ -1,0 +1,269 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 3b60dc45..4488c0f1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1219,6 +1219,7 @@ dependencies = [
+  "serde_json",
+  "thiserror 2.0.18",
+  "uuid",
++ "zeroize",
+ ]
+ 
+ [[package]]
+diff --git a/crates/buzz-acp/src/config.rs b/crates/buzz-acp/src/config.rs
+index 9a1b74c2..b4c016c3 100644
+--- a/crates/buzz-acp/src/config.rs
++++ b/crates/buzz-acp/src/config.rs
+@@ -240,8 +240,11 @@ pub struct CliArgs {
+     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
+     pub relay_url: String,
+ 
+-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+-    pub private_key: String,
++    #[arg(long, env = "BUZZ_PRIVATE_KEY", conflicts_with = "private_key_file")]
++    pub private_key: Option<String>,
++
++    #[arg(long, env = "BUZZ_PRIVATE_KEY_FILE", conflicts_with = "private_key")]
++    pub private_key_file: Option<PathBuf>,
+ 
+     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
+     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
+@@ -809,13 +812,12 @@ impl Config {
+     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
+     /// validation path without going through process args.
+     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
+-        let keys = Keys::parse(&args.private_key)?;
+-        // Best-effort zeroize: overwrite the raw private key string to reduce
+-        // exposure via core dumps or heap inspection (#41). Without the `zeroize`
+-        // crate we can only clear the String — the allocator may retain copies.
+-        args.private_key
+-            .replace_range(.., &"0".repeat(args.private_key.len()));
+-        args.private_key.clear();
++        let private_key = buzz_sdk::identity::read_private_key(
++            args.private_key.take(),
++            args.private_key_file.take(),
++        )
++        .map_err(|e| ConfigError::ConfigFile(e.to_string()))?;
++        let keys = Keys::parse(private_key.as_str())?;
+ 
+         let system_prompt = if let Some(text) = args.system_prompt {
+             Some(text)
+@@ -2657,6 +2659,19 @@ channels = "ALL"
+     // The env-var wiring is covered by the clap #[arg(env)] attribute itself.
+ 
+     // A minimal valid private key for test use (secp256k1 scalar = 1).
++    #[test]
++    fn private_key_file_is_accepted_and_conflicts_with_inline_key() {
++        assert!(CliArgs::try_parse_from(["buzz-acp", "--private-key-file", "/run/key"]).is_ok());
++        assert!(CliArgs::try_parse_from([
++            "buzz-acp",
++            "--private-key",
++            "x",
++            "--private-key-file",
++            "/run/key"
++        ])
++        .is_err());
++    }
++
+     const TEST_PRIVATE_KEY: &str =
+         "0000000000000000000000000000000000000000000000000000000000000001";
+ 
+diff --git a/crates/buzz-cli/src/lib.rs b/crates/buzz-cli/src/lib.rs
+index 6ab81a08..78c3f2a3 100644
+--- a/crates/buzz-cli/src/lib.rs
++++ b/crates/buzz-cli/src/lib.rs
+@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
+ use client::BuzzClient;
+ use error::CliError;
+ use nostr::Keys;
++use std::path::PathBuf;
+ use uuid::Uuid;
+ 
+ /// Run the Buzz CLI from raw arguments (including `argv[0]`).
+@@ -82,9 +83,13 @@ struct Cli {
+     relay: String,
+ 
+     /// Nostr private key (hex or nsec). This is the CLI's identity.
+-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
++    #[arg(long, env = "BUZZ_PRIVATE_KEY", conflicts_with = "private_key_file")]
+     private_key: Option<String>,
+ 
++    /// Read the Nostr private key from a protected regular file.
++    #[arg(long, env = "BUZZ_PRIVATE_KEY_FILE", conflicts_with = "private_key")]
++    private_key_file: Option<PathBuf>,
++
+     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
+     #[arg(long, env = "BUZZ_AUTH_TAG")]
+     auth_tag: Option<String>,
+@@ -1743,11 +1748,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
+ 
+     // Auth: private key is required for all relay operations.
+     // The keypair IS the identity — no tokens, no other auth.
+-    let private_key_str = cli.private_key.ok_or_else(|| {
+-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
+-    })?;
+-    let keys = Keys::parse(&private_key_str)
+-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
++    let private_key = buzz_sdk::identity::read_private_key(cli.private_key, cli.private_key_file)
++        .map_err(|e| CliError::Auth(e.to_string()))?;
++    let keys = Keys::parse(private_key.as_str())
++        .map_err(|_| CliError::Key("invalid private key".into()))?;
+ 
+     // NIP-OA: parse and verify the auth tag if provided.
+     let (auth_tag, auth_tag_json) = match cli.auth_tag {
+@@ -1803,6 +1807,28 @@ mod tests {
+         Cli::command().debug_assert();
+     }
+ 
++    #[test]
++    fn private_key_file_is_accepted_and_conflicts_with_inline_key() {
++        assert!(Cli::try_parse_from([
++            "buzz",
++            "--private-key-file",
++            "/run/key",
++            "channels",
++            "list"
++        ])
++        .is_ok());
++        assert!(Cli::try_parse_from([
++            "buzz",
++            "--private-key",
++            "x",
++            "--private-key-file",
++            "/run/key",
++            "channels",
++            "list"
++        ])
++        .is_err());
++    }
++
+     #[test]
+     fn command_inventory_is_stable() {
+         let expected_groups: Vec<&str> = vec![
+diff --git a/crates/buzz-sdk/Cargo.toml b/crates/buzz-sdk/Cargo.toml
+index da8fd0bd..340724b1 100644
+--- a/crates/buzz-sdk/Cargo.toml
++++ b/crates/buzz-sdk/Cargo.toml
+@@ -8,9 +8,10 @@ repository.workspace = true
+ description = "Typed Nostr event builders for Buzz operations"
+ 
+ [dependencies]
++thiserror = { workspace = true }
++zeroize = { workspace = true }
+ buzz-core = { workspace = true }
+ nostr = { workspace = true }
+ uuid = { workspace = true }
+ serde = { workspace = true }
+ serde_json = { workspace = true }
+-thiserror = { workspace = true }
+diff --git a/crates/buzz-sdk/src/identity.rs b/crates/buzz-sdk/src/identity.rs
+new file mode 100644
+index 00000000..aa2fcc2b
+--- /dev/null
++++ b/crates/buzz-sdk/src/identity.rs
+@@ -0,0 +1,93 @@
++//! Protected private-key input shared by Buzz binaries.
++
++use std::{
++    fs,
++    path::{Path, PathBuf},
++};
++use thiserror::Error;
++use zeroize::Zeroizing;
++
++const MAX_KEY_BYTES: u64 = 256;
++
++/// Secret-free private-key input errors.
++#[derive(Debug, Error)]
++pub enum IdentityError {
++    /// No key source was configured.
++    #[error("private key is required")]
++    Missing,
++    /// More than one key source was configured.
++    #[error("configure exactly one private key source")]
++    Multiple,
++    /// The protected key file was unsafe or malformed.
++    #[error("private key file is invalid")]
++    InvalidFile,
++}
++
++/// Read exactly one inline or protected regular-file private key.
++pub fn read_private_key(
++    inline: Option<String>,
++    file: Option<PathBuf>,
++) -> Result<Zeroizing<String>, IdentityError> {
++    match (inline, file) {
++        (None, None) => Err(IdentityError::Missing),
++        (Some(_), Some(_)) => Err(IdentityError::Multiple),
++        (Some(value), None) if valid(&value) => Ok(Zeroizing::new(value)),
++        (Some(_), None) => Err(IdentityError::InvalidFile),
++        (None, Some(path)) => read_file(&path),
++    }
++}
++
++fn read_file(path: &Path) -> Result<Zeroizing<String>, IdentityError> {
++    let metadata = fs::symlink_metadata(path).map_err(|_| IdentityError::InvalidFile)?;
++    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_KEY_BYTES {
++        return Err(IdentityError::InvalidFile);
++    }
++    let mut bytes = Zeroizing::new(fs::read(path).map_err(|_| IdentityError::InvalidFile)?);
++    if bytes.last() == Some(&b'\n') {
++        bytes.pop();
++        if bytes.last() == Some(&b'\r') {
++            bytes.pop();
++        }
++    }
++    let value = String::from_utf8(bytes.to_vec()).map_err(|_| IdentityError::InvalidFile)?;
++    if !valid(&value) {
++        return Err(IdentityError::InvalidFile);
++    }
++    Ok(Zeroizing::new(value))
++}
++
++fn valid(value: &str) -> bool {
++    !value.is_empty() && !value.bytes().any(|b| b == 0 || b.is_ascii_whitespace())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::{fs::OpenOptions, io::Write};
++
++    #[test]
++    fn protected_file_parser_rejects_unsafe_shapes() {
++        let dir = std::env::temp_dir().join(format!("buzz-key-test-{}", std::process::id()));
++        let _ = fs::remove_dir_all(&dir);
++        fs::create_dir(&dir).unwrap();
++        let key = dir.join("key");
++        let mut f = OpenOptions::new()
++            .create_new(true)
++            .write(true)
++            .open(&key)
++            .unwrap();
++        writeln!(f, "{}", "1".repeat(64)).unwrap();
++        assert_eq!(read_private_key(None, Some(key.clone())).unwrap().len(), 64);
++        fs::write(&key, b"a\nb\n").unwrap();
++        assert!(read_private_key(None, Some(key.clone())).is_err());
++        fs::write(&key, vec![b'a'; 257]).unwrap();
++        assert!(read_private_key(None, Some(key.clone())).is_err());
++        #[cfg(unix)]
++        {
++            let link = dir.join("link");
++            std::os::unix::fs::symlink(&key, &link).unwrap();
++            assert!(read_private_key(None, Some(link)).is_err());
++        }
++        fs::remove_dir_all(dir).unwrap();
++    }
++}
+diff --git a/crates/buzz-sdk/src/lib.rs b/crates/buzz-sdk/src/lib.rs
+index 4ee0cd4c..6582a0a4 100644
+--- a/crates/buzz-sdk/src/lib.rs
++++ b/crates/buzz-sdk/src/lib.rs
+@@ -13,6 +13,7 @@
+ //! No keys are held here. No network calls are made.
+ 
+ pub mod builders;
++pub mod identity;
+ pub mod mentions;
+ pub mod nip_oa;
+ 

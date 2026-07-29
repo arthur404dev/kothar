@@ -166,7 +166,11 @@ func ApplyFixture(root, receiptPath string, p Plan, failAfter int) error {
 			continue
 		}
 		dst := filepath.Join(root, filepath.Clean("/"+a.Path))
-		if !strings.HasPrefix(dst, filepath.Clean(root)+string(filepath.Separator)) {
+		rootPrefix := filepath.Clean(root)
+		if rootPrefix != string(filepath.Separator) {
+			rootPrefix += string(filepath.Separator)
+		}
+		if !strings.HasPrefix(dst, rootPrefix) {
 			rollback()
 			return fmt.Errorf("artifact escapes root")
 		}

@@ -15,6 +15,7 @@ import (
 	enginepi "github.com/arthur404dev/kothar/internal/engine/pi"
 	"github.com/arthur404dev/kothar/internal/framework"
 	"github.com/arthur404dev/kothar/internal/inbound"
+	inboundbuzz "github.com/arthur404dev/kothar/internal/inbound/buzz"
 	"github.com/arthur404dev/kothar/internal/manifest"
 	"github.com/arthur404dev/kothar/internal/records"
 	"github.com/arthur404dev/kothar/internal/securefs"
@@ -25,6 +26,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -78,7 +80,11 @@ func (a *app) serveACP() *cobra.Command {
 		for _, name := range append(m.Behavior.ContextFiles, m.Behavior.Skills...) {
 			system += "\n\n# " + name + "\n" + string(r.Resources[name])
 		}
-		svc := framework.New(a.engineAgent(r, system, false), a.factory)
+		factory := a.factory
+		if state := os.Getenv("KOTHAR_AGENT_STATE_DIR"); state != "" {
+			factory = enginepi.NewFactory(filepath.Join(state, "engine", "pi"))
+		}
+		svc := framework.New(a.engineAgent(r, system, false), factory)
 		return (&acp.Server{In: c.InOrStdin(), Out: c.OutOrStdout(), Err: c.ErrOrStderr(), Service: svc}).Serve(c.Context())
 	}}
 	completeAgents(c, a)
@@ -213,9 +219,12 @@ func (a *app) plan(id string, r *loadedRecord, prev *deploy.Receipt, refresh boo
 		arts = append(arts, deploy.Artifact{Path: "etc/kothar/agents/" + id + "/" + filepath.ToSlash(name), Mode: 0600, Category: "behavior", Content: b})
 	}
 	piMeta, _ := json.Marshal(map[string]string{"command": "/usr/local/libexec/kothar/pi", "version": engine.PiVersion, "sha256": enginepi.CLIHash})
+	buzzMeta, _ := json.Marshal(map[string]string{"revision": inboundbuzz.Revision, "patch_sha256": inboundbuzz.PatchSHA256, "buzz_acp_sha256": inboundbuzz.ACPBinarySHA256, "buzz_sha256": inboundbuzz.CLIBinarySHA256})
 	arts = append(arts,
 		deploy.Artifact{Path: "var/lib/kothar/agents/" + id + "/engine/pi/metadata.json", Mode: 0600, Category: "engine", Content: append(piMeta, '\n')},
-		deploy.Artifact{Path: "etc/systemd/system/" + deploy.Unit(id) + ".d/10-kothar.conf", Mode: 0644, Category: "service", Content: []byte("# Buzz/systemd binding supplied by task 6\n")})
+		deploy.Artifact{Path: "var/lib/kothar/agents/" + id + "/inbound/buzz/metadata.json", Mode: 0600, Category: "inbound", Content: append(buzzMeta, '\n')},
+		deploy.Artifact{Path: "etc/systemd/system/kothar-agent@.service", Mode: 0644, Category: "service", Content: inboundbuzz.Unit()},
+		deploy.Artifact{Path: "etc/systemd/system/" + deploy.Unit(id) + ".d/10-kothar.conf", Mode: 0644, Category: "service", Content: inboundbuzz.DropIn(id, r.Manifest)})
 	return deploy.Build(id, r.Effective, prev, refresh, arts), nil
 }
 func (a *app) diff() *cobra.Command {
@@ -265,7 +274,7 @@ func (a *app) apply() *cobra.Command {
 		for _, item := range items {
 			have[item.Name] = true
 		}
-		refs := []string{m.Inbound.Options.IdentityCredential}
+		refs := []string{}
 		for _, ref := range m.Engine.Credentials.Overrides {
 			refs = append(refs, ref)
 		}
@@ -281,18 +290,82 @@ func (a *app) apply() *cobra.Command {
 		if e != nil {
 			return e
 		}
+		if len(p.Categories) == 0 && !refresh {
+			return nil
+		}
 		root := os.Getenv("KOTHAR_DEPLOY_ROOT")
 		if root == "" {
 			root = "/"
 		}
+		if root == "/" {
+			credential := filepath.Join("/etc/credstore.encrypted", m.Inbound.Options.IdentityCredential)
+			fi, statErr := os.Lstat(credential)
+			if statErr != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0077 != 0 {
+				return fmt.Errorf("protected inbound credential is unavailable")
+			}
+		}
 		if e = deploy.ApplyFixture(root, a.store.Receipt(id), p, -1); e != nil {
+			return e
+		}
+		uid, gid, e := ensureAgentUser(id, root)
+		if e != nil {
 			return e
 		}
 		system := string(r.Resources[m.Behavior.SystemPrompt])
 		for _, name := range append(m.Behavior.ContextFiles, m.Behavior.Skills...) {
 			system += "\n\n# " + name + "\n" + string(r.Resources[name])
 		}
-		return enginepi.Prepare(filepath.Join(root, "var/lib/kothar/agents", id, "engine"), a.engineAgent(r, system, refresh), "/usr/local/libexec/kothar/buzz")
+		if e = enginepi.Prepare(filepath.Join(root, "var/lib/kothar/agents", id, "engine"), a.engineAgent(r, system, refresh), "/usr/local/libexec/kothar/buzz"); e != nil {
+			return e
+		}
+		state := filepath.Join(root, "var/lib/kothar/agents", id)
+		if root == "/" {
+			for _, parent := range []string{filepath.Join(root, "var/lib/kothar"), filepath.Join(root, "var/lib/kothar/agents"), filepath.Join(root, "etc/kothar"), filepath.Join(root, "etc/kothar/agents")} {
+				if e = os.Chmod(parent, 0755); e != nil {
+					return e
+				}
+			}
+			configDir := filepath.Join(root, "etc/kothar/agents", id)
+			if e = filepath.Walk(configDir, func(path string, info os.FileInfo, err error) error {
+				if err != nil {
+					return err
+				}
+				mode := os.FileMode(0640)
+				if info.IsDir() {
+					mode = 0750
+				}
+				if err = os.Chown(path, 0, gid); err != nil {
+					return err
+				}
+				return os.Chmod(path, mode)
+			}); e != nil {
+				return e
+			}
+		}
+		if e = os.Chown(state, uid, gid); e != nil {
+			return e
+		}
+		if e = filepath.Walk(state, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			return os.Chown(path, uid, gid)
+		}); e != nil {
+			return e
+		}
+		if root != "/" {
+			return nil
+		}
+		if _, e = a.runner.Run(c.Context(), "systemctl", "daemon-reload"); e != nil {
+			return e
+		}
+		if m.Runtime.StartOnBoot {
+			if _, e = a.runner.Run(c.Context(), "systemctl", "enable", deploy.Unit(id)); e != nil {
+				return e
+			}
+		}
+		_, e = deploy.Service(c.Context(), a.runner, id, "restart")
+		return e
 	})
 	c.Flags().Bool("refresh-credentials", false, "reseed inherited provider credentials")
 	c.Flags().StringSlice("allow-mount-root", nil, "allowed host mount root")
@@ -510,6 +583,28 @@ func editFile(p string) error {
 	return cmd.Run()
 }
 func Execute(version string) error { return New(version).ExecuteContext(context.Background()) }
+
+func ensureAgentUser(id, root string) (int, int, error) {
+	if root != "/" {
+		return os.Geteuid(), os.Getegid(), nil
+	}
+	u, err := user.Lookup(id)
+	if errors.Is(err, user.UnknownUserError(id)) {
+		if out, runErr := exec.Command("useradd", "--system", "--home-dir", "/var/lib/kothar/agents/"+id+"/home", "--shell", "/usr/sbin/nologin", "--user-group", id).CombinedOutput(); runErr != nil {
+			return 0, 0, fmt.Errorf("create agent user: %s: %w", strings.TrimSpace(string(out)), runErr)
+		}
+		u, err = user.Lookup(id)
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return 0, 0, err
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	return uid, gid, err
+}
 func defaultManifest(id string, cfg config.Config) []byte {
 	title := strings.ToUpper(id[:1]) + id[1:]
 	v := map[string]any{"version": 1, "id": id, "profile": map[string]any{"display_name": title, "description": "", "labels": []string{}}, "inbound": map[string]any{"name": "buzz", "options": map[string]any{"relay": "wss://buzz.4o4.one", "identity_credential": "buzz-" + id, "respond_to": map[string]any{"mode": "nobody", "pubkeys": []string{}}, "heartbeat_seconds": 300}}, "engine": map[string]any{"name": "pi", "credentials": map[string]any{"mode": "inherit", "overrides": map[string]string{}}, "options": map[string]any{"project_trust": "never", "telemetry": false, "update_checks": false}}, "models": map[string]any{"primary": "anthropic/claude-sonnet-4-6", "fallbacks": []string{}, "thinking": "high", "max_attempts": 2}, "behavior": map[string]any{"system_prompt": "SYSTEM.md", "context_files": []string{"AGENTS.md", "CONSTRAINTS.md"}, "skills": []string{}, "extensions": []string{}}, "tools": map[string]any{"bundles": []string{"buzz", "workspace", "git"}, "allow": []string{}, "deny": []string{}, "credentials": map[string]string{}}, "workspace": map[string]any{"root": "workspace", "mounts": []any{}}, "permissions": map[string]any{"network": map[string]any{"mode": "full"}, "resources": map[string]any{"memory_max_mb": 4096, "cpu_quota_percent": 200, "tasks_max": 512}}, "runtime": map[string]any{"driver": "systemd", "start_on_boot": true, "restart": "always", "workers": 1}}

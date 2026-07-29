@@ -1,0 +1,11 @@
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":2,"clientCapabilities":{"auth":{"terminal":true}},"clientInfo":{"name":"buzz-acp","version":"<pinned>"}}}
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentInfo":{"name":"kothar","version":"<build>"},"agentCapabilities":{"loadSession":true}}}
+{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/workspace","mcpServers":[],"systemPrompt":"<effective-system-prompt>"}}
+{"jsonrpc":"2.0","id":1,"result":{"sessionId":"<session>"}}
+{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"<session>","prompt":[{"type":"text","text":"Reply exactly: ACP_OK"}]}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"<session>","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ACP"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"<session>","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"_OK"}}}}
+{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"<session>","prompt":[{"type":"text","text":"<long-running>"}]}}
+{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"<session>"}}
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}

@@ -1,0 +1,10 @@
+{"id":"state","type":"get_state"}
+{"type":"response","id":"state","command":"get_state","success":true,"data":{"sessionId":"<redacted>","sessionFile":"<ISOLATED_HOME>/sessions/<redacted>.jsonl","messageCount":0}}
+{"id":"prompt","type":"prompt","message":"Reply exactly: KOTHAR_OK"}
+{"type":"response","id":"prompt","command":"prompt","success":true}
+{"type":"agent_start"}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"KOTHAR_OK"}}
+{"type":"agent_end"}
+{"type":"agent_settled"}
+{"id":"abort","type":"abort"}
+{"type":"response","id":"abort","command":"abort","success":true}

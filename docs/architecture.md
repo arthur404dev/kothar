@@ -31,3 +31,5 @@ Each applied agent is one root-owned systemd unit and process tree. Network poli
 
 - upstream buzz-acp commit: `7dfea2634f7e87f6a42f5fc1f22d9f77c648abfc`
 - Pi: `0.82.1`
+
+The reproduced wire, engine, failure, limitation, and single-owner matrices are in [compatibility/acp-pi-contracts.md](compatibility/acp-pi-contracts.md).

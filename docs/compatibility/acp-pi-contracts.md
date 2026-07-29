@@ -28,7 +28,7 @@ Transport is UTF-8 JSON-RPC 2.0, exactly one JSON object plus LF per stdout reco
 | errors | Preserve JSON-RPC numeric code/message. Use `-32602` for malformed/unknown session input and `-32603` for internal launch/runtime failure; distinguish framing/parse, process exit, timeout, cancellation timeout, engine/auth/provider, and policy errors internally. Never convert a failure into assistant text. |
 | persistence | ACP maps opaque session IDs only. Load/list/delete are advertised only when implemented; Pi session files remain engine-owned. Multiple prompts for one session serialize. |
 
-`testdata/buzz-acp-lifecycle.ndjson` is the redacted deterministic lifecycle fixture. It proves v2, session creation, ordered text streaming, terminal stop reason, and notification-shaped cancellation without a relay.
+`testdata/buzz-acp-lifecycle.ndjson` is a redacted framing example, not evidence of an executable Kothar runtime. It covers v2, session creation, ordered text streaming, terminal stop reason, and notification-shaped cancellation. The baseline implements `initialize`, `session/new`, `session/prompt`, `session/update`, and `session/cancel`; it honestly advertises `loadSession:false`. Session load/list/delete remain future methods and must stay absent or false until implemented.
 
 ## Pi engine contract (`internal/engine/pi`)
 
@@ -38,13 +38,13 @@ Launch the reviewed absolute Pi CLI directly as an argv vector, never through a 
 |---|---|
 | handshake/state | Correlated `get_state` and `get_available_models`; require successful responses. Capture opaque session ID/file only under the isolated root. No models/auth becomes an auth/config failure, not an empty healthy capability. |
 | prompt | Send `{type:"prompt",id,message,images?}`. Its response means accepted, not completed. Stream `message_update` deltas and tool events; finish only on `agent_settled` (0.82.1's strongest full-run boundary), not `turn_end` and not merely the acceptance response. |
-| cancel | Send correlated `abort`; bound acknowledgement and `agent_settled`, then TERM/KILL/reap. The real isolated probe settled and acknowledged in 647 ms. |
-| persistence | `--session-dir` is mandatory. A real probe wrote only isolated `auth.json`, `models-store.json`, and `sessions/*.jsonl`; `get_state.sessionFile` stayed under that directory and message count became 2. Ordinary reapply must preserve it. |
+| cancel | Send correlated `abort`; bound acknowledgement and `agent_settled`, then TERM/KILL/reap. The real isolated active-turn probe reached `agent_settled` and then acknowledged abort in 12 ms. Pi emitted no separate `cancelled` event; the actual cancellation boundary was assistant `stopReason:"aborted"` followed by `agent_end`, `agent_settled`, and the successful correlated abort response. |
+| persistence | `--session-dir` is mandatory. The disposable probe reported `get_state.sessionFile` only as `<ISOLATED_DIR>/sessions/<session>.jsonl`; the credential source was referenced without copying and was not recorded. Ordinary reapply must preserve engine-owned session files. |
 | system prompt | Pi supports launch-time `--system-prompt` and repeatable `--append-system-prompt`; use argv/file content assembled by the Pi owner before launch. ACP `systemPrompt` is normalized by the framework but pi-acp 0.0.32 ignores it. Kothar must not silently ignore it. |
 | tools | Pi's reviewed `--tools`/`--exclude-tools` flags select built-in/extension/custom tools. Normalize text/thought, tool start/update/end, location, result/error and extension UI requests. Unsupported interactive UI is cancelled explicitly. |
 | errors | Classify spawn `ENOENT`/`EACCES`, malformed/non-JSON or oversized stdout, early exit/signal, correlated `success:false`, auth/no-model, provider failure, timeout, and cancellation escalation. Redact paths/provider/session identifiers at trust boundaries. |
 
-The safe reference prompt used a disposable Pi directory, copied only the existing selected auth file with mode 0600, disabled tools, and requested `KOTHAR_OK`. Deltas were `K`, `OTH`, `AR`, `_OK`; events ended `agent_end`, `agent_settled`; no stderr appeared. No credential or provider/session identifier is recorded.
+The primary sanitized evidence is `testdata/pi-rpc-probe.json`, `testdata/pi-rpc-lifecycle.ndjson`, and `testdata/pi-rpc-active-cancel.ndjson`. A real disposable Pi 0.82.1 process used placeholder-recorded isolated `HOME`, `PI_CODING_AGENT_DIR`, and session paths, referenced the existing auth file without copying or recording it, disabled tools and project resources, and requested `KOTHAR_OK`. The prompt command was accepted; real deltas were `K`, `OTH`, `AR`, `_OK`; ordered events continued through `agent_end` and `agent_settled`; stdin EOF exited 0; stdout was NDJSON-only and stderr was empty. The active prompt was aborted immediately after `agent_start`; Pi emitted `stopReason:"aborted"`, `agent_end`, `agent_settled`, then acknowledged abort successfully in 12 ms and exited 0. No explicit `cancelled` event was emitted. Provider request/account IDs, real session IDs, credentials, tokens, and host paths were removed rather than copied into evidence.
 
 ## Framework normalization (`internal/framework`)
 
@@ -54,16 +54,16 @@ Framework request: opaque session ID, absolute cwd, ordered content blocks, effe
 
 ## Direct Buzz CLI decision
 
-Do not route Buzz tools through ACP `mcpServers`. Upstream Buzz builds one stdio MCP entry from `BUZZ_ACP_MCP_COMMAND` and injects relay identity into its environment, but the Pi boundary cannot consume it. Kothar instead exposes a root-registry-selected, absolute upstream `buzz` CLI through a reviewed Pi tool/extension and gives it per-agent context through protected environment/credential files. Manifest data never chooses the executable, relay identity never enters argv/prompt/repository, and `internal/inbound/buzz` remains owner of Buzz deployment metadata rather than tool execution.
+Do not route Buzz tools through ACP `mcpServers`. Upstream Buzz builds one stdio MCP entry from `BUZZ_ACP_MCP_COMMAND` and injects relay identity into its environment, but the Pi boundary cannot consume it. Ownership is singular: `internal/inbound/buzz` owns the buzz-acp deployment executable and configuration metadata; `internal/framework` owns only the generic declared tool grant; `internal/engine/pi` resolves the root-registry-reviewed absolute Buzz multicall CLI path and exposes it in Pi's tool environment. Manifest data never chooses either executable, and relay identity never enters argv, prompts, or the repository.
 
 ## Single-owner matrix
 
 | Requirement | Sole owner |
 |---|---|
 | JSON-RPC/NDJSON, v2 negotiation, method validation, ACP error mapping, session ID map, cancellation drain, stdout discipline | `internal/acp` |
-| Effective prompt/system prompt, queue/steer policy, normalized request/event/error types, permission and capability policy | `internal/framework` |
-| Pi argv/env/isolation, RPC correlation, session files, stream/tool translation, abort/escalation, provider/auth failures | `internal/engine/pi` |
-| Buzz command/path and relay-side process configuration | `internal/inbound/buzz` (deployment metadata only) |
+| Effective prompt/system prompt, queue/steer policy, normalized request/event/error types, permission/capability policy, generic declared tool grant | `internal/framework` |
+| Pi argv/env/isolation, RPC correlation, session files, stream/tool translation, abort/escalation, provider/auth failures, reviewed absolute Buzz multicall CLI resolution/exposure | `internal/engine/pi` |
+| buzz-acp deployment executable and relay-side configuration metadata | `internal/inbound/buzz` |
 
 No behavior is shared ambiguously: ACP translates wire to framework; framework decides policy; Pi translates framework to Pi RPC.
 

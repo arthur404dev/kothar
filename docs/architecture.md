@@ -11,11 +11,11 @@ The data path is Buzz event -> pinned upstream buzz-acp -> ACP stdin/stdout -> g
 ## Package boundaries
 
 - `internal/inbound`: minimal static inbound/deployment adapter registry.
-- `internal/inbound/buzz`: fixed upstream buzz-acp metadata only; no Nostr implementation.
+- `internal/inbound/buzz`: fixed upstream buzz-acp deployment executable and configuration metadata only; no Nostr implementation.
 - `internal/acp`: ACP framing, lifecycle, sessions, streaming, cancellation, errors, and stdout discipline; no Buzz or Pi imports.
-- `internal/framework`: normalized engine-independent orchestration, policy, and types; no ACP wire, Buzz, or Pi imports.
+- `internal/framework`: normalized engine-independent orchestration, policy, types, and generic declared tool grants; no ACP wire, Buzz, or Pi imports.
 - `internal/engine`: minimal engine contract and static registry.
-- `internal/engine/pi`: Pi process/RPC/settings/capabilities boundary; no ACP or Buzz imports.
+- `internal/engine/pi`: Pi process/RPC/settings/capabilities boundary, including resolution and exposure of the reviewed absolute Buzz multicall CLI path in Pi's tool environment; no ACP imports.
 - `internal/manifest`, future `records`, `credentials`, `deploy/systemd`, and current `xdg` each own only their control-plane responsibility.
 - `cmd/kothar/internal/cli` is the composition root and may wire concrete implementations.
 

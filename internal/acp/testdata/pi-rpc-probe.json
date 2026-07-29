@@ -27,6 +27,7 @@
   },
   "credentialHandling": "existing auth file referenced read-only; not copied or recorded",
   "promptInput": {"id": "prompt", "type": "prompt", "message": "Reply exactly: KOTHAR_OK"},
+  "activeCancelSetupInput": {"id": "state", "type": "get_state"},
   "activeCancelInput": [
     {"id": "prompt", "type": "prompt", "message": "Write integers forever, one per line. Do not stop."},
     {"after": "agent_start", "id": "abort", "type": "abort"}

@@ -94,16 +94,23 @@ func TestPiRPCActiveCancellationEvidence(t *testing.T) {
 	messages := readFixture(t, "pi-rpc-active-cancel.ndjson")
 	start, end, settled := indexOf(messages, "agent_start"), indexOf(messages, "agent_end"), indexOf(messages, "agent_settled")
 	abort := -1
+	var aborted []string
 	for i, message := range messages {
 		if message["id"] == "abort" && message["command"] == "abort" && message["success"] == true {
 			abort = i
 		}
+		if body, ok := message["message"].(map[string]any); ok && body["role"] == "assistant" && body["stopReason"] == "aborted" {
+			aborted = append(aborted, message["type"].(string))
+		}
 	}
-	if start < 0 || end <= start || settled <= end || abort <= settled {
-		t.Fatal("active prompt must reach aborted agent_end/agent_settled before abort acknowledgement")
+	if start < 0 || settled != end+1 || abort != settled+1 {
+		t.Fatal("active prompt must reach ordered agent_end, agent_settled, then abort acknowledgement")
 	}
-	if reasons := messages[end]["stopReasons"].([]any); len(reasons) != 1 || reasons[0] != "aborted" {
-		t.Fatalf("actual Pi cancellation boundary = %v", reasons)
+	if strings.Join(aborted, ",") != "message_start,message_end,turn_end" {
+		t.Fatalf("actual Pi aborted events = %v", aborted)
+	}
+	if len(messages[end]) != 1 {
+		t.Fatalf("agent_end must retain Pi's recorded shape: %v", messages[end])
 	}
 }
 
@@ -116,6 +123,7 @@ func TestPiRPCProbeMetadataAndRedaction(t *testing.T) {
 		PiVersion, PiCliSha256 string
 		Command                []string
 		Environment            map[string]string
+		ActiveCancelSetupInput map[string]any
 		ActiveCancelInput      []map[string]any
 		Prompt, ActiveCancel   struct {
 			ExitStatus     int
@@ -135,8 +143,11 @@ func TestPiRPCProbeMetadataAndRedaction(t *testing.T) {
 	if evidence.Prompt.ExitStatus != 0 || evidence.Prompt.Stdout != "ndjson-only" || evidence.Prompt.Stderr != "empty" || evidence.ActiveCancel.ExitStatus != 0 || evidence.ActiveCancel.Stdout != "ndjson-only" || evidence.ActiveCancel.Stderr != "empty" {
 		t.Fatal("probe exit and stdout/stderr classifications must be explicit")
 	}
+	if evidence.ActiveCancelSetupInput["id"] != "state" || evidence.ActiveCancelSetupInput["type"] != "get_state" {
+		t.Fatal("active cancellation get_state setup input must be explicit")
+	}
 	if len(evidence.ActiveCancelInput) != 2 || evidence.ActiveCancelInput[0]["type"] != "prompt" || evidence.ActiveCancelInput[1]["type"] != "abort" || evidence.ActiveCancelInput[1]["after"] != "agent_start" {
-		t.Fatal("sanitized input evidence must order active prompt then abort after agent_start")
+		t.Fatal("sanitized active cancellation input must order prompt then abort after agent_start")
 	}
 	if evidence.ActiveCancel.AbortElapsedMs == nil || *evidence.ActiveCancel.AbortElapsedMs < 0 || *evidence.ActiveCancel.AbortElapsedMs > 1000 {
 		t.Fatalf("active abort elapsed milliseconds = %v", evidence.ActiveCancel.AbortElapsedMs)

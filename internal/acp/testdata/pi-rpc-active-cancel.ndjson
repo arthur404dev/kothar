@@ -7,6 +7,6 @@
 {"type":"message_start","message":{"role":"assistant","stopReason":"aborted","errorMessage":"Request was aborted"}}
 {"type":"message_end","message":{"role":"assistant","stopReason":"aborted","errorMessage":"Request was aborted"}}
 {"type":"turn_end","message":{"role":"assistant","stopReason":"aborted","errorMessage":"Request was aborted"}}
-{"type":"agent_end","willRetry":false,"stopReasons":["aborted"]}
+{"type":"agent_end"}
 {"type":"agent_settled"}
 {"id":"abort","type":"response","command":"abort","success":true}
